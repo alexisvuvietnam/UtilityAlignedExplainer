@@ -7,8 +7,11 @@ def shannon_entropy(probs, base=np.e):
     log_probs = np.log(nz_probs) / np.log(base)
     return -np.sum(nz_probs * log_probs)
 
-def entropy_by_hick(allow_rational_time, observation_time):
+def entropy_by_hick(allow_rational_time, observation_time, **kwargs):
     assert observation_time > 0, "Are you an alien?"
+    if "reflexion_time" in kwargs:
+        assert kwargs["reflexion_time"] >= 0, "Are you an alien?"
+        return (allow_rational_time - kwargs["reflexion_time"]) / observation_time
     return allow_rational_time / observation_time
 
 def entropy_by_weber_fechner(saliency_size, observation_size, base=np.e):
