@@ -132,7 +132,7 @@ class PrototypeExplainer(ABC):
         self.ohe_group = ohe_group
 
     @abstractmethod
-    def explain_instance(self, x_instance):
+    def explain_instance(self, x_instance, **kwargs):
         pass
 
     @abstractmethod
@@ -155,7 +155,7 @@ class PrototypeTabularExplainer(PrototypeExplainer):
         else:
             self.bounded_rational = np.inf
 
-    def explain_instance(self, x_instance):
+    def explain_instance(self, x_instance, min_features=1, max_features=5):
         self.explanations = []
 
         features, feature_values = get_lime_result(self.model, self.X_train, x_instance, random_seed=self.seed)
@@ -171,7 +171,7 @@ class PrototypeTabularExplainer(PrototypeExplainer):
         sort_idx_lime_true = np.argsort(lime_result["values"])[::-1]
         feature_rank = lime_result["features"][sort_idx_lime_true]
         value_rank = lime_result["values"][sort_idx_lime_true]
-        for i in range(1, len(feature_rank) + 1):
+        for i in range(min_features, max_features + 1):
             causal_proba = calculate_do_probability_tabular(self.model, self.X_train, x_instance, feature_rank[:i], random_seed=self.seed, ohe_group=self.ohe_group)
             causal_entropy = shannon_entropy(causal_proba)
             if causal_entropy <= self.bounded_rational:
@@ -181,7 +181,7 @@ class PrototypeTabularExplainer(PrototypeExplainer):
         sort_idx_lime_abs = np.argsort(lime_result["absolute"])[::-1]
         feature_rank = lime_result["features"][sort_idx_lime_abs]
         value_rank = lime_result["absolute"][sort_idx_lime_abs]
-        for i in range(1, len(feature_rank) + 1):
+        for i in range(min_features, max_features + 1):
             causal_proba = calculate_do_probability_tabular(self.model, self.X_train, x_instance, feature_rank[:i], random_seed=self.seed, ohe_group=self.ohe_group)
             causal_entropy = shannon_entropy(causal_proba)
             if causal_entropy <= self.bounded_rational:
@@ -191,7 +191,7 @@ class PrototypeTabularExplainer(PrototypeExplainer):
         sort_idx_shap_true = np.argsort(shap_result["values"])[::-1]
         feature_rank = shap_result["features"][sort_idx_shap_true]
         value_rank = shap_result["values"][sort_idx_shap_true]
-        for i in range(1, len(feature_rank) + 1):
+        for i in range(min_features, max_features + 1):
             causal_proba = calculate_do_probability_tabular(self.model, self.X_train, x_instance, feature_rank[:i], random_seed=self.seed, ohe_group=self.ohe_group)
             causal_entropy = shannon_entropy(causal_proba)
             if causal_entropy <= self.bounded_rational:
@@ -201,7 +201,7 @@ class PrototypeTabularExplainer(PrototypeExplainer):
         sort_idx_shap_abs = np.argsort(shap_result["absolute"])[::-1]
         feature_rank = shap_result["features"][sort_idx_shap_abs]
         value_rank = shap_result["absolute"][sort_idx_shap_abs]
-        for i in range(1, len(feature_rank) + 1):
+        for i in range(min_features, max_features + 1):
             causal_proba = calculate_do_probability_tabular(self.model, self.X_train, x_instance, feature_rank[:i], random_seed=self.seed, ohe_group=self.ohe_group)
             causal_entropy = shannon_entropy(causal_proba)
             if causal_entropy <= self.bounded_rational:
