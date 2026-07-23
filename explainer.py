@@ -198,3 +198,6 @@ class PrototypeTabularExplainer(PrototypeExplainer):
 
     def extract_explanation(self):
         return self.explanations
+
+class PrototypeImageExplainer(PrototypeExplainer):
+    pass
