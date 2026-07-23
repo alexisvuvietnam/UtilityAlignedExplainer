@@ -197,7 +197,9 @@ class PrototypeTabularExplainer(PrototypeExplainer):
         self.explanations.sort(key=lambda e: self.utility_matrix @ e["probability"].T, reverse = True)
 
     def extract_explanation(self):
-        return self.explanations
+        explanation = self.explanations[0]
+        explanation["expected utility"] = self.utility_matrix @ explanation["probability"].T
+        return explanation
 
 class PrototypeImageExplainer(PrototypeExplainer):
     pass
