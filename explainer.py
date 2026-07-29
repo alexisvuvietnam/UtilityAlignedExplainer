@@ -11,10 +11,8 @@ from utils import *
 def estimate_interventional_probability_tabular(model, X_train, x_instance, intervention_features):
     tmp = X_train.copy()
     
-    # SỬA LỖI PANDAS: x_instance là DataFrame (iloc[[0]]), nên lấy .values để gán an toàn
     intervention_values = x_instance[intervention_features].values
     
-    # SỬA LỖI CÚ PHÁP: Dùng .loc thay vì [:, ...] cho Pandas DataFrame
     if isinstance(tmp, pd.DataFrame):
         tmp.loc[:, intervention_features] = intervention_values
     else:
@@ -28,7 +26,6 @@ def decision_making_explanation_form(features, expected_utility, information_sco
 
 class PrototypeExplainer(ABC):
     def __init__(self, *, model, actions, causal_model:CausalModel, utility_matrix, X_train, cognitive_method, information_method, base=np.e, random_seed=42, **kwargs):
-        # SỬA LỖI THUỘC TÍNH: causal_model.outcomes thay vì causal_model.actions
         assert set(actions) == causal_model.outcomes, "Invalid causal model"
         self.model = model
         self.actions = actions
@@ -52,7 +49,6 @@ class PrototypeExplainer(ABC):
 class PrototypeTabularExplainer(PrototypeExplainer):
     def __init__(self, features, model, actions, causal_model:CausalModel, utility_matrix, X_train, minimalism=False, cognitive_method:Sequence[Literal["quantity", "time"]]=("quantity",), information_method:Literal["shannon", "gini"]="shannon", base=np.e, random_seed=42, ohe_group=None, **kwargs):
         
-        # SỬA LỖI KEYWORD-ONLY & TRUYỀN THIẾU THAM SỐ
         super().__init__(
             model=model, 
             actions=actions, 
@@ -60,7 +56,7 @@ class PrototypeTabularExplainer(PrototypeExplainer):
             utility_matrix=utility_matrix, 
             X_train=X_train, 
             cognitive_method=cognitive_method, 
-            information_method=information_method, # Tham số bị thiếu
+            information_method=information_method,
             base=base, 
             random_seed=random_seed
         )
@@ -104,7 +100,6 @@ class PrototypeTabularExplainer(PrototypeExplainer):
             expected_utility = np.sum(self.utility_matrix @ probs.T)
             self.explanations.append(decision_making_explanation_form(set(e), expected_utility, information_score))
             
-        # SỬA LỖI SORTING LOGIC: Thêm dấu '-' trước e["information score"] để ưu tiên Entropy nhỏ nhất
         self.explanations.sort(
             reverse=True, 
             key=lambda e: (
