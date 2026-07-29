@@ -39,10 +39,10 @@ class CausalModel:
 
     def __init__(self, features, actions):
         self.regimes = set(map(lambda x: f"F_{x}", features))
-        self.treatments = features
-        self.outcomes = actions
-        self.nodes = self.treatments + self.regimes + self.outcomes
-        self.edges = []
+        self.treatments = set(features)
+        self.outcomes = set(actions)
+        self.nodes = self.treatments | self.regimes | self.outcomes
+        #self.edges = []
         self.graph = gum.DAG()
         self.id = set(enumerate(self.nodes))
         self.treatmentId = [i for (i, name) in self.id if name in self.treatments]
@@ -50,13 +50,17 @@ class CausalModel:
         for i, name in self.id:
             self.graph.addNodeWithId(i)
             self.graph.setName(i, name)
+        for i in self.treatmentId:
+            name = self.graph.nameFromId(i)
+            j = self.graph.idFromName(f"F_{name}")
+            self.graph.addArc(j, i)
 
     def add_causal_edge(self, feature_from, feature_to):
         assert feature_from in self.nodes and feature_to in self.nodes, "Those things do not exist"
         i = self.graph.idFromName(feature_from)
         j = self.graph.idFromName(feature_to)
         assert i is not None and j is not None, "Those things do not exist"
-        self.graph.addArc(tail=i, head=j)
+        self.graph.addArc(i, j)
 
     def backdoor_satisfaction(self, feature):
         assert feature in self.treatments, "This feature does not exist"
@@ -64,7 +68,7 @@ class CausalModel:
         regimeId = self.graph.idFromName(f"F_{feature}")
         remained_treatmentId = self.treatmentId[:]
         remained_treatmentId.remove(featureId)
-        return self.graph.dSeparation(regimeId, remained_treatmentId) and self.graph.dSeparation(regimeId, self.outcomeId, Z=self.treatmentId)
+        return self.graph.dSeparation(regimeId, remained_treatmentId) and self.graph.dSeparation(regimeId, self.outcomeId, self.treatmentId)
 
     def getDAG(self):
         return self.graph
