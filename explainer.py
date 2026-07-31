@@ -1,4 +1,5 @@
 from abc import ABC, abstractmethod
+import itertools
 import lime
 import numpy as np
 import pandas as pd
@@ -21,22 +22,63 @@ def estimate_interventional_probability_tabular(model, X_train, x_instance, inte
     probs = model.predict_proba(tmp)
     return probs.mean(axis=0)
 
-def decision_making_explanation_form(features, expected_utility, information_score):
-    return {"features": features, "utility score": expected_utility, "information score": information_score}
+def decision_making_explanation_form(features, probability, expected_utility, information_score, action):
+    return {"features": str(features), "prediction probability": probability, "utility score": expected_utility, "preferrable action": action, "information score": information_score}
+
+def explanation_form(feature, weight):
+    return {"feature": feature, "signed score": weight, "absolute score": abs(weight)}
+
+def lime_explanation_form(model, lime_explainer, x_instance_1d, importance=True):
+    raw_pred = model.predict(x_instance_1d.to_frame().T)[0]
+    class_idx = np.where(model.classes_ == raw_pred)[0][0]
+    exp = lime_explainer.explain_instance(data_row=x_instance_1d, predict_fn=model.predict_proba,labels=(class_idx,))
+    res_map = exp.as_map()[class_idx]
+    feature_names = x_instance_1d.index.tolist()
+    attribution = []
+    for feat_idx, weight in res_map:
+        feature = feature_names[feat_idx]
+        attribution.append(explanation_form(feature, weight))
+    attribution.sort(reverse=True, key=lambda x: (x["absolute score"] if importance else x["signed score"]))
+    return attribution
+
+def shap_explanation_form(model, shap_explainer, x_instance_2d, importance=True):
+    raw_pred = model.predict(x_instance_2d)[0]
+    class_idx = np.where(model.classes_ == raw_pred)[0][0]
+
+    shap_vals = shap_explainer.shap_values(x_instance_2d)
+    if isinstance(shap_vals, list):
+        instance_shap = shap_vals[class_idx][0] 
+    else:
+        if len(shap_vals.shape) == 3: 
+            instance_shap = shap_vals[0, :, class_idx]
+        else:
+            instance_shap = shap_vals[0]
+            
+    if isinstance(x_instance_2d, pd.DataFrame):
+        feature_names = x_instance_2d.columns.tolist()
+    else:
+        feature_names = [f"Feature_{i}" for i in range(len(instance_shap))]
+        
+    attribution = []
+    for feature, weight in zip(feature_names, instance_shap):
+        attribution.append(explanation_form(feature, weight))
+        
+    attribution.sort(reverse=True, key=lambda x: (x["absolute score"] if importance else x["signed score"]))
+    
+    return attribution
 
 class PrototypeExplainer(ABC):
-    def __init__(self, *, model, actions, causal_model:CausalModel, utility_matrix, X_train, cognitive_method, information_method, base=np.e, random_seed=42, **kwargs):
+    def __init__(self, model, X_train, *, actions, causal_model:CausalModel, utility_matrix, information_method, base=np.e, **kwargs):
         assert set(actions) == causal_model.outcomes, "Invalid causal model"
         self.model = model
         self.actions = actions
         self.causal_model = causal_model
         self.utility_matrix = utility_matrix
         self.X_train = X_train
-        self.cognitive = cognitive_method
         self.information = information_method
-        self.seed = random_seed
         self.base = base
         self.explanations = []
+        self.attributions = []
 
     @abstractmethod
     def explain_instance(self, x_instance, **kwargs):
@@ -47,34 +89,25 @@ class PrototypeExplainer(ABC):
         pass
 
 class PrototypeTabularExplainer(PrototypeExplainer):
-    def __init__(self, features, model, actions, causal_model:CausalModel, utility_matrix, X_train, minimalism=False, cognitive_method:Sequence[Literal["quantity", "time"]]=("quantity",), information_method:Literal["shannon", "gini"]="shannon", base=np.e, random_seed=42, ohe_group=None, **kwargs):
+    def __init__(self, model, X_train, features, actions, causal_model:CausalModel, utility_matrix, information_method:Literal["shannon", "gini"]="shannon", base=np.e, ohe_group=None, **kwargs):
         
         super().__init__(
-            model=model, 
+            model,
+            X_train, 
             actions=actions, 
             causal_model=causal_model, 
-            utility_matrix=utility_matrix, 
-            X_train=X_train, 
-            cognitive_method=cognitive_method, 
+            utility_matrix=utility_matrix,
             information_method=information_method,
-            base=base, 
-            random_seed=random_seed
+            base=base
         )
         
         self.features = features
         self.ohe_group = ohe_group if ohe_group is not None else {}
 
-        # Information and cognitive constraint
-        self.minimalism = minimalism
+        # Information and cognitive constraints
         self.max_features = len(features)
-        if "quantity" in self.cognitive and "max_features" in kwargs:
-            self.max_features = kwargs["max_features"]
             
-        self.max_entropy = np.inf
-        if "time" in self.cognitive and "max_rational_time" in kwargs and "observation_time" in kwargs:
-            self.max_entropy = kwargs["max_rational_time"]/kwargs["observation_time"]
-            
-        self.max_impurity = np.inf
+        self.information_bound = np.inf
 
         # Global extraction
         self.critical_features = set()
@@ -82,38 +115,140 @@ class PrototypeTabularExplainer(PrototypeExplainer):
             if self.causal_model.backdoor_satisfaction(f):
                 self.critical_features.add(f)
 
-    def explain_instance(self, x_instance, max_k_features=5):
-        max_size = min(self.max_features, max_k_features)
-        explanation_combination = get_combinations_up_to_k(self.critical_features, max_size)
+    def explain_instance(self, x_instance):
+        explanation_combination = get_combinations_up_to_k(self.critical_features, self.max_features)
         self.explanations = []
         for e in explanation_combination:
-            probs = estimate_interventional_probability_tabular(self.model, self.X_train, x_instance, list(e))
+            standard_e = list(e)[:]
+            for f in e:
+                if f in self.ohe_group:
+                    standard_e.remove(f)
+                    standard_e += self.ohe_group[f]
+            probs = estimate_interventional_probability_tabular(self.model, self.X_train, x_instance, list(standard_e))
             
             information_score = 0
             if self.information == "shannon":
                 information_score = shannon_entropy(probs, base=self.base)
-                if information_score > self.max_entropy: continue
             elif self.information == "gini":
                 information_score = gini_impurity(probs)
-                if information_score > self.max_impurity: continue
                 
-            expected_utility = np.sum(self.utility_matrix @ probs.T)
-            self.explanations.append(decision_making_explanation_form(set(e), expected_utility, information_score))
+            expected_utility = np.max(self.utility_matrix @ probs.T)
+            self.explanations.append(decision_making_explanation_form(set(e), probs, expected_utility, information_score, self.actions[np.argmax(self.utility_matrix @ probs.T)]))
             
         self.explanations.sort(
             reverse=True, 
             key=lambda e: (
                 e["utility score"], 
                 -e["information score"], 
-                len(e["features"]) if self.minimalism else -len(e["features"])
+                len(e["features"])
             )
         )
 
+        return self.extract_explanation()
+
+    def explain_instance_k_features(self, x_instance, num_features):
+        if num_features > len(self.critical_features):
+            return
+        explanation_combination = itertools.combinations(self.critical_features, num_features)
+        self.explanations = []
+        for e in explanation_combination:
+            standard_e = list(e)[:]
+            for f in e:
+                if f in self.ohe_group:
+                    standard_e.remove(f)
+                    standard_e += self.ohe_group[f]
+            probs = estimate_interventional_probability_tabular(self.model, self.X_train, x_instance, list(standard_e))
+                    
+            information_score = 0
+            if self.information == "shannon":
+                information_score = shannon_entropy(probs, base=self.base)
+            elif self.information == "gini":
+                information_score = gini_impurity(probs)
+                    
+            expected_utility = np.max(self.utility_matrix @ probs.T)
+            self.explanations.append(decision_making_explanation_form(set(e), probs, expected_utility, information_score, self.actions[np.argmax(self.utility_matrix @ probs.T)]))
+                    
+        self.explanations.sort(
+            reverse=True, 
+            key=lambda e: (
+                e["utility score"], 
+                -e["information score"], 
+                len(e["features"])
+            )
+        )
+
+        return self.extract_explanation()
+
+    def explain_instance_with_rationality(self, x_instance, minimalism=False, cognitive_method:Sequence[Literal["quantity", "time"]]=("quantity",), **kwargs):
+        max_k_features = self.max_features
+        information_bound = self.information_bound
+        if "quantity" in cognitive_method:
+            assert "max_k_features" in kwargs, "Invalid call"
+            max_k_features = kwargs["max_k_features"]
+        if "time" in cognitive_method:
+            assert "allow_rational_time" in kwargs and "observation_time" in kwargs, "Invalid call"
+            if "reflexion_time" in kwargs:
+                information_bound = entropy_by_hick(kwargs["allow_rational_time"], kwargs["observation_time"], reflexion_time="reflexion_time")
+            else:
+                information_bound = entropy_by_hick(kwargs["allow_rational_time"], kwargs["observation_time"])
+        explanation_combination = get_combinations_up_to_k(self.critical_features, max_k_features)
+        self.explanations = []
+        for e in explanation_combination:
+            standard_e = list(e)[:]
+            for f in e:
+                if f in self.ohe_group:
+                    standard_e.remove(f)
+                    standard_e += self.ohe_group[f]
+            probs = estimate_interventional_probability_tabular(self.model, self.X_train, x_instance, list(standard_e))
+            
+            information_score = 0
+            if self.information == "shannon":
+                information_score = shannon_entropy(probs, base=self.base)
+                if information_score > information_bound: continue
+            elif self.information == "gini":
+                information_score = gini_impurity(probs)
+                if information_score > information_bound: continue
+                
+            expected_utility = np.max(self.utility_matrix @ probs.T)
+            self.explanations.append(decision_making_explanation_form(set(e), probs, expected_utility, information_score, self.actions[np.argmax(self.utility_matrix @ probs.T)]))
+            
+        self.explanations.sort(
+            reverse=True, 
+            key=lambda e: (
+                e["utility score"], 
+                -e["information score"], 
+                -len(e["features"]) if minimalism else len(e["features"])
+            )
+        )
+
+    def extract_attribution(self, x_instance):
+        self.attributions = []
+        for f in self.features:
+            probs = None
+            if f in self.critical_features:
+                if f in self.ohe_group:
+                    probs = estimate_interventional_probability_tabular(self.model, self.X_train, x_instance, self.ohe_group[f])
+                else:
+                    probs = estimate_interventional_probability_tabular(self.model, self.X_train, x_instance, [f])
+            else:
+                probs = self.model.predict_proba(x_instance)[0]
+            information_score = 0
+            if self.information == "shannon":
+                information_score = shannon_entropy(probs, base=self.base)
+            elif self.information == "gini":
+                information_score = gini_impurity(probs)
+            self.attributions.append(decision_making_explanation_form(f, probs, np.max(self.utility_matrix @ probs.T), information_score, self.actions[np.argmax(self.utility_matrix @ probs.T)]))
+        self.attributions.sort(
+            reverse=True, 
+            key=lambda e: (
+                e["utility score"], 
+                -e["information score"]
+            )
+        )
+        return self.attributions
+
     def extract_explanation(self):
         return self.explanations
-
-    def extract_critical_features(self):
-        return self.critical_features
 
 class PrototypeImageExplainer(PrototypeExplainer):
     pass

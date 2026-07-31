@@ -35,6 +35,61 @@ def get_combinations_up_to_k(data, k):
         result.extend(itertools.combinations(data, r))
     return result
 
+def _get_target_prob(model, instance, target_class):
+    probs = model.predict_proba(instance)
+    return probs[0, target_class] if probs.ndim == 2 else probs[target_class]
+
+def MoRF(model, x_instance, features, attributions, masking_value):
+    rank = np.argsort(attributions)[::-1]
+    ranked_features = features[rank]
+    
+    res = model.predict(x_instance)
+    target_class = res[0] if isinstance(res, (np.ndarray, list)) else res
+    original_prob = _get_target_prob(model, x_instance, target_class)
+    
+    instance = x_instance.copy()
+    morf_score = 0.0
+    
+    for k in range(len(features)):
+        feature_to_mask = ranked_features[k]
+        instance[feature_to_mask] = masking_value
+        
+        new_prob = _get_target_prob(model, instance, target_class)
+        morf_score += (original_prob - new_prob)
+        
+    return morf_score / (len(features) + 1)
+    
+def LeRF(model, x_instance, features, attributions, masking_value):
+    rank = np.argsort(attributions)
+    ranked_features = features[rank]
+    
+    res = model.predict(x_instance)
+    target_class = res[0] if isinstance(res, (np.ndarray, list)) else res
+    original_prob = _get_target_prob(model, x_instance, target_class)
+    
+    instance = x_instance.copy()
+    lerf_score = 0.0
+    
+    for k in range(len(features)):
+        feature_to_mask = ranked_features[k]
+        instance[feature_to_mask] = masking_value
+        
+        new_prob = _get_target_prob(model, instance, target_class)
+        lerf_score += (original_prob - new_prob)
+        
+    return lerf_score / (len(features) + 1)
+
+def ABPC(model, x_instance, features, attributions, masking_value):
+    return MoRF(model, x_instance, features, attributions, masking_value) - LeRF(model, x_instance, features, attributions, masking_value)
+
+def jaccard_similarity(A, B):
+    return len(set(A) & set(B)) / max(len(set(A) | set(B)), 1e-16)
+
+def spearman_similarity(A, B):
+    C = set(A) & set(B)
+    assert C != set(), "There is no similarity to compare"
+    return 1 - (6 * sum((A.index(x) - B.index(x))**2 for x in C)) / max(len(A) * (len(A)**2 - 1), 1e-16)
+
 class CausalModel:
 
     def __init__(self, features, actions):
@@ -69,6 +124,13 @@ class CausalModel:
         remained_treatmentId = self.treatmentId[:]
         remained_treatmentId.remove(featureId)
         return self.graph.dSeparation(regimeId, remained_treatmentId) and self.graph.dSeparation(regimeId, self.outcomeId, self.treatmentId)
+
+    def causal_consistency(self, features_list):
+        assert set(features_list) & self.treatmentId != set() and set(features_list) | self.outcomeId == self.outcomeId, "Invalid input"
+        causal_valid = 0
+        for feature in features_list:
+            causal_valid += self.backdoor_satisfaction(feature)
+        return causal_valid / len(features_list)
 
     def getDAG(self):
         return self.graph
