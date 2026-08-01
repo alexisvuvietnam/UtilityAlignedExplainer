@@ -126,7 +126,7 @@ class CausalModel:
         return self.graph.dSeparation(regimeId, remained_treatmentId) and self.graph.dSeparation(regimeId, self.outcomeId, self.treatmentId)
 
     def causal_consistency(self, features_list):
-        assert set(features_list) & self.treatmentId != set() and set(features_list) | self.outcomeId == self.outcomeId, "Invalid input"
+        assert set(features_list) & self.treatments != set() and set(features_list) & self.outcomes == set(), "Invalid input"
         causal_valid = 0
         for feature in features_list:
             causal_valid += self.backdoor_satisfaction(feature)
