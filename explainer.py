@@ -67,7 +67,7 @@ def shap_explanation_form(model, shap_explainer, x_instance_2d, importance=True)
     
     return attribution
 
-class PrototypeExplainer(ABC):
+class UtilityAlignedExplainer(ABC):
     def __init__(self, model, X_train, *, actions, causal_model:CausalModel, utility_matrix, information_method, base=np.e, **kwargs):
         assert set(actions) == causal_model.outcomes, "Invalid causal model"
         self.model = model
@@ -88,7 +88,7 @@ class PrototypeExplainer(ABC):
     def extract_explanation(self):
         pass
 
-class PrototypeTabularExplainer(PrototypeExplainer):
+class UtilityAlignedTabularExplainer(UtilityAlignedExplainer):
     def __init__(self, model, X_train, features, actions, causal_model:CausalModel, utility_matrix, information_method:Literal["shannon", "gini"]="shannon", base=np.e, ohe_group=None, **kwargs):
         
         super().__init__(
@@ -250,5 +250,5 @@ class PrototypeTabularExplainer(PrototypeExplainer):
     def extract_explanation(self):
         return self.explanations
 
-class PrototypeImageExplainer(PrototypeExplainer):
+class UtilityAlignedImageExplainer(UtilityAlignedExplainer):
     pass

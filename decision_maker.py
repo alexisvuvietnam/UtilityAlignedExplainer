@@ -18,7 +18,7 @@ class ExplainerTester:
         self.X_test = X_test
         self.lime_explainer = lime_explainer
         self.shap_explainer = shap_explainer
-        self.causal_explainer = PrototypeTabularExplainer(self.model, self.X_train, self.features, self.actions, self.causal_model, self.utility_matrix)
+        self.causal_explainer = UtilityAlignedTabularExplainer(self.model, self.X_train, self.features, self.actions, self.causal_model, self.utility_matrix)
         self.num_instance = min(len(self.X_test), n_samples)
 
     ### XAI EMPIRICAL TESTS FROM HERE
@@ -60,11 +60,11 @@ class ExplainerTester:
         if display:
             data_list = []
             for i in range(self.num_instance):
-                data_list.append({"Explainer": "Prototype", "Metric": "Jaccard", "Score": causal_data["jaccard"][i]})
+                data_list.append({"Explainer": "Utility-aligned", "Metric": "Jaccard", "Score": causal_data["jaccard"][i]})
                 data_list.append({"Explainer": "LIME", "Metric": "Jaccard", "Score": lime_data["jaccard"][i]})
                 data_list.append({"Explainer": "SHAP", "Metric": "Jaccard", "Score": shap_data["jaccard"][i]})
                 
-                data_list.append({"Explainer": "Prototype", "Metric": "Spearman", "Score": causal_data["spearman"][i]})
+                data_list.append({"Explainer": "Utility-aligned", "Metric": "Spearman", "Score": causal_data["spearman"][i]})
                 data_list.append({"Explainer": "LIME", "Metric": "Spearman", "Score": lime_data["spearman"][i]})
                 data_list.append({"Explainer": "SHAP", "Metric": "Spearman", "Score": shap_data["spearman"][i]})
                 
@@ -141,11 +141,11 @@ class ExplainerTester:
         if display:
             data_list = []
             for i in range(self.num_instance):
-                data_list.append({"Explainer": "Prototype", "Metric": "Jaccard", "Score": causal_rob["jaccard"][i]})
+                data_list.append({"Explainer": "Utility-aligned", "Metric": "Jaccard", "Score": causal_rob["jaccard"][i]})
                 data_list.append({"Explainer": "LIME", "Metric": "Jaccard", "Score": lime_rob["jaccard"][i]})
                 data_list.append({"Explainer": "SHAP", "Metric": "Jaccard", "Score": shap_rob["jaccard"][i]})
                 
-                data_list.append({"Explainer": "Prototype", "Metric": "Spearman", "Score": causal_rob["spearman"][i]})
+                data_list.append({"Explainer": "Utility-aligned", "Metric": "Spearman", "Score": causal_rob["spearman"][i]})
                 data_list.append({"Explainer": "LIME", "Metric": "Spearman", "Score": lime_rob["spearman"][i]})
                 data_list.append({"Explainer": "SHAP", "Metric": "Spearman", "Score": shap_rob["spearman"][i]})
                 
@@ -178,7 +178,7 @@ class ExplainerTester:
         return causal_rob, lime_rob, shap_rob
 
     def sensitivity_test(self, noise_std=0.01, display=False):
-        sensitivity_data = {"Prototype": [], "LIME": [], "SHAP": []}
+        sensitivity_data = {"Utility-aligned": [], "LIME": [], "SHAP": []}
 
         for i in range(self.num_instance):
             inst_1d = self.X_test.iloc[i].copy()
@@ -197,7 +197,7 @@ class ExplainerTester:
             p_s_n = np.array([v["utility score"] for v in proto_exp_noisy])
             (_, l_s_n), (_, s_s_n) = self._get_lime_shap_attributions(inst_1d_noisy, inst_2d_noisy)
 
-            sensitivity_data["Prototype"].append(np.linalg.norm(p_s - p_s_n))
+            sensitivity_data["Utility-aligned"].append(np.linalg.norm(p_s - p_s_n))
             sensitivity_data["LIME"].append(np.linalg.norm(l_s - l_s_n))
             sensitivity_data["SHAP"].append(np.linalg.norm(s_s - s_s_n))
 
@@ -214,7 +214,7 @@ class ExplainerTester:
         return sensitivity_data
 
     def fidelity_test(self, masking_value=0, display=False):
-        fidelity_data = {"Prototype": [], "LIME": [], "SHAP": []}
+        fidelity_data = {"Utility-aligned": [], "LIME": [], "SHAP": []}
 
         for i in range(self.num_instance):
             inst_1d = self.X_test.iloc[i]
@@ -228,7 +228,7 @@ class ExplainerTester:
             (l_f, l_s), (s_f, s_s) = self._get_lime_shap_attributions(inst_1d, inst_2d)
 
             proto_abpc = ABPC(self.model, inst_2d, p_f[:num_critical], p_s[:num_critical], masking_value)
-            fidelity_data["Prototype"].append(proto_abpc)
+            fidelity_data["Utility-aligned"].append(proto_abpc)
 
             lime_abpc = ABPC(self.model, inst_2d, l_f[:num_critical], l_s[:num_critical], masking_value)
             fidelity_data["LIME"].append(lime_abpc)
@@ -249,7 +249,7 @@ class ExplainerTester:
         return fidelity_data
 
     def causality_test(self, display=False):
-        causality_data = {"Prototype": [], "LIME": [], "SHAP": []}
+        causality_data = {"Utility-aligned": [], "LIME": [], "SHAP": []}
 
         for i in range(self.num_instance):
             inst_1d = self.X_test.iloc[i]
@@ -259,7 +259,7 @@ class ExplainerTester:
 
             (l_f, _), (s_f, _) = self._get_lime_shap_attributions(inst_1d, inst_2d)
 
-            causality_data["Prototype"].append(1.0)
+            causality_data["Utility-aligned"].append(1.0)
 
             lime_cv = self.causal_model.causal_consistency(l_f[:num_critical])
             causality_data["LIME"].append(lime_cv)
@@ -280,7 +280,7 @@ class ExplainerTester:
         return causality_data
 
     def utility_test(self, display=False):
-        utility_data = {"Prototype": [], "LIME": [], "SHAP": []}
+        utility_data = {"Utility-aligned": [], "LIME": [], "SHAP": []}
 
         for i in range(self.num_instance):
             inst_1d = self.X_test.iloc[i]
@@ -291,7 +291,7 @@ class ExplainerTester:
             (l_f, _), (s_f, _) = self._get_lime_shap_attributions(inst_1d, inst_2d)
     
             prototype_probs = estimate_interventional_probability_tabular(self.model, self.X_train, inst_2d, best_proto_features)
-            utility_data["Prototype"].append(np.max(self.utility_matrix @ prototype_probs.T))
+            utility_data["Utility-aligned"].append(np.max(self.utility_matrix @ prototype_probs.T))
 
             cv_s_f = []
             for i in s_f:
