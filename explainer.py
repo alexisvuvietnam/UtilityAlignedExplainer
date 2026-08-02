@@ -31,7 +31,7 @@ def explanation_form(feature, weight):
 def lime_explanation_form(model, lime_explainer, x_instance_1d, importance=True):
     raw_pred = model.predict(x_instance_1d.to_frame().T)[0]
     class_idx = np.where(model.classes_ == raw_pred)[0][0]
-    exp = lime_explainer.explain_instance(data_row=x_instance_1d, predict_fn=model.predict_proba,labels=(class_idx,))
+    exp = lime_explainer.explain_instance(data_row=x_instance_1d.to_numpy(), predict_fn=model.predict_proba,labels=(class_idx,))
     res_map = exp.as_map()[class_idx]
     feature_names = x_instance_1d.index.tolist()
     attribution = []
