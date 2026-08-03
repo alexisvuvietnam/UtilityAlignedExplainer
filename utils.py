@@ -2,6 +2,8 @@ import itertools
 import numpy as np
 import pyagrum as gum
 from scipy.stats import spearmanr
+from sklearn.base import BaseEstimator, clone
+import xgboost as xgb
 
 def shannon_entropy(probs, base=np.e):
     probs = np.asarray(probs, dtype=float)
@@ -39,7 +41,7 @@ def _get_target_prob(model, instance, target_class):
     probs = model.predict_proba(instance)
     return probs[0, target_class] if probs.ndim == 2 else probs[target_class]
 
-def MoRF(model, x_instance, features, attributions, masking_value):
+def MoRF(model, x_instance, features, attributions, baseline_vector):
     rank = np.argsort(attributions)[::-1]
     ranked_features = features[rank]
     
@@ -49,17 +51,19 @@ def MoRF(model, x_instance, features, attributions, masking_value):
     
     instance = x_instance.copy()
     morf_score = 0.0
+    morf_cumul = []
     
     for k in range(len(features)):
         feature_to_mask = ranked_features[k]
-        instance[feature_to_mask] = masking_value
+        instance[feature_to_mask] = baseline_vector[feature_to_mask]
         
         new_prob = _get_target_prob(model, instance, target_class)
         morf_score += (original_prob - new_prob)
-        
-    return morf_score / (len(features) + 1)
+        morf_cumul.append(original_prob - new_prob)
+
+    return morf_score / (len(features) + 1), np.array(morf_cumul)
     
-def LeRF(model, x_instance, features, attributions, masking_value):
+def LeRF(model, x_instance, features, attributions, baseline_vector):
     rank = np.argsort(attributions)
     ranked_features = features[rank]
     
@@ -69,18 +73,103 @@ def LeRF(model, x_instance, features, attributions, masking_value):
     
     instance = x_instance.copy()
     lerf_score = 0.0
+    lerf_cumul = []
     
     for k in range(len(features)):
         feature_to_mask = ranked_features[k]
-        instance[feature_to_mask] = masking_value
+        instance[feature_to_mask] = baseline_vector[feature_to_mask]
         
         new_prob = _get_target_prob(model, instance, target_class)
         lerf_score += (original_prob - new_prob)
-        
-    return lerf_score / (len(features) + 1)
+        lerf_cumul.append(original_prob - new_prob)
 
-def ABPC(model, x_instance, features, attributions, masking_value):
-    return MoRF(model, x_instance, features, attributions, masking_value) - LeRF(model, x_instance, features, attributions, masking_value)
+    return lerf_score / (len(features) + 1), np.array(lerf_cumul)
+
+def ABPC(model, x_instance, features, attributions, baseline_vector):
+    mo, morf_cumul = MoRF(model, x_instance, features, attributions, baseline_vector)
+    le, lerf_cumul = LeRF(model, x_instance, features, attributions, baseline_vector)
+    return mo - le, morf_cumul - lerf_cumul
+
+def LOCO(model, x_instance, features, attributions, baseline_vector, X_train, y_train):
+    rank = np.argsort(attributions)[::-1]
+    ranked_features = features[rank]
+    
+    res = model.predict(x_instance)
+    target_class = res[0] if isinstance(res, (np.ndarray, list)) else res
+    original_prob = _get_target_prob(model, x_instance, target_class)
+    
+    instance = x_instance.copy()
+    loco_score = 0.0
+    loco_cumul = []
+
+    X_train_clone = X_train.copy()
+    
+    for k in range(len(features)):
+        feature_to_mask = ranked_features[k]
+        X_train_clone[feature_to_mask] = baseline_vector[feature_to_mask]
+        instance[feature_to_mask] = baseline_vector[feature_to_mask]
+
+        if isinstance(model, BaseEstimator):
+            cloned_model = clone(model)
+        elif isinstance(model, xgb.XGBClassifier):
+            cloned_model = xgb.XGBClassifier()
+            cloned_model.set_params(**model.get_params())
+        else:
+            raise ValueError("Unsupported model type. Please provide a scikit-learn estimator or an XGBoost classifier.")
+
+        cloned_model.fit(X_train_clone, y_train)    
+        new_prob = _get_target_prob(cloned_model, instance, target_class)
+
+        loco_score += (original_prob - new_prob)
+        loco_cumul.append(original_prob - new_prob)
+
+    return loco_score, np.array(loco_cumul)
+
+def local_MoRF(model, x_instance, features, attributions, baseline_vector, k):
+    rank = np.argsort(attributions)[::-1]
+    ranked_features = features[rank][:k]
+    
+    res = model.predict(x_instance)
+    target_class = res[0] if isinstance(res, (np.ndarray, list)) else res
+    original_prob = _get_target_prob(model, x_instance, target_class)
+    
+    instance = x_instance.copy()
+    
+    for feature_to_mask in ranked_features:
+        instance[feature_to_mask] = baseline_vector[feature_to_mask]
+        
+    new_prob = _get_target_prob(model, instance, target_class)
+        
+    return original_prob - new_prob
+
+def local_LOCO(model, x_instance, features, attributions, baseline_vector, k, X_train, y_train):
+    rank = np.argsort(attributions)[::-1]
+    ranked_features = features[rank][:k]
+    
+    res = model.predict(x_instance)
+    target_class = res[0] if isinstance(res, (np.ndarray, list)) else res
+    original_prob = _get_target_prob(model, x_instance, target_class)
+    
+    instance = x_instance.copy()
+
+    X_train_clone = X_train.copy()
+    
+    for feature_to_mask in ranked_features:
+        X_train_clone[feature_to_mask] = baseline_vector[feature_to_mask]
+        instance[feature_to_mask] = baseline_vector[feature_to_mask]
+
+    if isinstance(model, BaseEstimator):
+        cloned_model = clone(model)
+    elif isinstance(model, xgb.XGBClassifier):
+        cloned_model = xgb.XGBClassifier()
+        cloned_model.set_params(**model.get_params())
+    else:
+        raise ValueError("Unsupported model type. Please provide a scikit-learn estimator or an XGBoost classifier.")
+
+    cloned_model.fit(X_train_clone, y_train)    
+    new_prob = _get_target_prob(cloned_model, instance, target_class)
+        
+    return original_prob - new_prob
 
 def jaccard_similarity(A, B):
     return len(set(A) & set(B)) / max(len(set(A) | set(B)), 1e-16)

@@ -2,19 +2,21 @@ import ast
 from explainer import *
 import matplotlib.pyplot as plt
 import lime
+import numpy as np
 import seaborn as sns
 import shap
 from utils import *
 
 class ExplainerTester:
 
-    def __init__(self, model, features, actions, causal_model, utility_matrix, X_train, X_test, lime_explainer, shap_explainer, n_samples=100):
+    def __init__(self, model, features, actions, causal_model, utility_matrix, X_train, y_train, X_test, lime_explainer, shap_explainer, n_samples=100):
         self.model = model
         self.features = features
         self.actions = actions
         self.causal_model = causal_model
         self.utility_matrix = utility_matrix
         self.X_train = X_train
+        self.y_train = y_train
         self.X_test = X_test
         self.lime_explainer = lime_explainer
         self.shap_explainer = shap_explainer
@@ -213,40 +215,69 @@ class ExplainerTester:
 
         return sensitivity_data
 
-    def fidelity_test(self, masking_value=0, display=False):
-        fidelity_data = {"Utility-aligned": [], "LIME": [], "SHAP": []}
+    def fidelity_test(self, display=False, top_k=5):
+        causal_fid = {"Local MORF": [], "Local LOCO": []}
+        lime_fid = {"Local MORF": [], "Local LOCO": []}
+        shap_fid = {"Local MORF": [], "Local LOCO": []}
+        baseline_vector = self.X_train.median()
 
         for i in range(self.num_instance):
             inst_1d = self.X_test.iloc[i]
             inst_2d = self.X_test.iloc[[i]]
 
-            num_critical = len(self.causal_explainer.critical_features)
-
-            proto_exp = self.causal_explainer.extract_attribution(inst_2d)
+            proto_exp = self.causal_explainer.explain_instance(inst_2d)
             p_f = np.array([v["features"] for v in proto_exp])
             p_s = np.array([v["utility score"] for v in proto_exp])
             (l_f, l_s), (s_f, s_s) = self._get_lime_shap_attributions(inst_1d, inst_2d)
 
-            proto_abpc = ABPC(self.model, inst_2d, p_f[:num_critical], p_s[:num_critical], masking_value)
-            fidelity_data["Utility-aligned"].append(proto_abpc)
+            exp_size = min(top_k, len(self.features) - 1, len(p_f) - 1)
 
-            lime_abpc = ABPC(self.model, inst_2d, l_f[:num_critical], l_s[:num_critical], masking_value)
-            fidelity_data["LIME"].append(lime_abpc)
+            causal_fid["Local MORF"].append(local_MoRF(self.model, inst_2d, np.array(list(ast.literal_eval(p_f[0]))), p_s[0], baseline_vector, exp_size))
+            lime_fid["Local MORF"].append(local_MoRF(self.model, inst_2d, l_f[:exp_size], l_s[:exp_size], baseline_vector, exp_size))
+            shap_fid["Local MORF"].append(local_MoRF(self.model, inst_2d, s_f[:exp_size], s_s[:exp_size], baseline_vector, exp_size))
 
-            shap_abpc = ABPC(self.model, inst_2d, s_f[:num_critical], s_s[:num_critical], masking_value)
-            fidelity_data["SHAP"].append(shap_abpc)
+            causal_fid["Local LOCO"].append(local_LOCO(self.model, inst_2d, np.array(list(ast.literal_eval(p_f[0]))), p_s[0], baseline_vector, exp_size, self.X_train, self.y_train))
+            lime_fid["Local LOCO"].append(local_LOCO(self.model, inst_2d, l_f[:exp_size], l_s[:exp_size], baseline_vector, exp_size, self.X_train, self.y_train))
+            shap_fid["Local LOCO"].append(local_LOCO(self.model, inst_2d, s_f[:exp_size], s_s[:exp_size], baseline_vector, exp_size, self.X_train, self.y_train))
 
         if display:
-            df = pd.DataFrame(fidelity_data).melt(var_name="Explainer", value_name="ABPC Score")
-            plt.figure(figsize=(8, 5))
-            sns.boxplot(data=df, x="Explainer", y="ABPC Score", palette="Set2", showfliers=False, width=0.5)
-            sns.stripplot(data=df, x="Explainer", y="ABPC Score", color=".2", size=5, alpha=0.6, jitter=True)
-            plt.title("Fidelity/Faithfulness Test (ABPC)")
-            plt.ylabel("Area Between Perturbation Curves (Higher is better)")
+            data_list = []
+            for i in range(self.num_instance):
+                data_list.append({"Explainer": "Utility-aligned", "Metric": "Local MORF", "Score": causal_fid["Local MORF"][i]})
+                data_list.append({"Explainer": "LIME", "Metric": "Local MORF", "Score": lime_fid["Local MORF"][i]})
+                data_list.append({"Explainer": "SHAP", "Metric": "Local MORF", "Score": shap_fid["Local MORF"][i]})
+
+                data_list.append({"Explainer": "Utility-aligned", "Metric": "Local LOCO", "Score": causal_fid["Local LOCO"][i]})
+                data_list.append({"Explainer": "LIME", "Metric": "Local LOCO", "Score": lime_fid["Local LOCO"][i]})
+                data_list.append({"Explainer": "SHAP", "Metric": "Local LOCO", "Score": shap_fid["Local LOCO"][i]})
+                
+            df = pd.DataFrame(data_list)
+            
+            sns.set_theme(style="whitegrid")
+            fig, axes = plt.subplots(1, 2, figsize=(14, 6))
+            fig.suptitle("Fidelity Test Between Explainers", fontsize=16, fontweight="bold")
+            
+            df_morf = df[df["Metric"] == "Local MORF"]
+            df_loco = df[df["Metric"] == "Local LOCO"]
+            
+            sns.boxplot(data=df_morf, x="Explainer", y="Score", ax=axes[0], palette="Set2", showfliers=False, width=0.5)
+            sns.stripplot(data=df_morf, x="Explainer", y="Score", ax=axes[0], color=".2", size=4, alpha=0.6, jitter=True)
+            axes[0].set_title("Local MORF Distribution", fontsize=13)
+            axes[0].set_ylabel("Local MORF Score", fontsize=12)
+            axes[0].set_xlabel("Explainer Method", fontsize=12)
+            axes[0].set_ylim(-0.05, 1.05)
+            
+            sns.boxplot(data=df_loco, x="Explainer", y="Score", ax=axes[1], palette="Set2", showfliers=False, width=0.5)
+            sns.stripplot(data=df_loco, x="Explainer", y="Score", ax=axes[1], color=".2", size=4, alpha=0.6, jitter=True)
+            axes[1].set_title("Local LOCO Distribution", fontsize=13)
+            axes[1].set_ylabel("Local LOCO Score", fontsize=12)
+            axes[1].set_xlabel("Explainer Method", fontsize=12)
+            axes[1].set_ylim(-1.05, 1.05)
+            
             plt.tight_layout()
             plt.show()
-
-        return fidelity_data
+        
+        return causal_fid, lime_fid, shap_fid
 
     def causality_test(self, display=False):
         causality_data = {"Utility-aligned": [], "LIME": [], "SHAP": []}
@@ -319,5 +350,279 @@ class ExplainerTester:
 
         return utility_data
 
-class PrototypeExplainerUser:
+class ReducedExplainerTester:
+
+    def __init__(self, model, features, X_train, y_train, X_test, lime_explainer, shap_explainer, n_samples=100):
+        self.model = model
+        self.features = features
+        self.X_train = X_train
+        self.y_train = y_train
+        self.X_test = X_test
+        self.lime_explainer = lime_explainer
+        self.shap_explainer = shap_explainer
+        self.num_instance = min(len(self.X_test), n_samples)
+
+    ### XAI EMPIRICAL TESTS FROM HERE
+    def consistency_test(self, display=False, top_k=5):
+        base_instance_1d = self.X_test.iloc[0]
+        base_instance_2d = self.X_test.iloc[[0]]
+        base_lime_explanation = lime_explanation_form(self.model, self.lime_explainer, base_instance_1d)
+        base_shap_explanation = shap_explanation_form(self.model, self.shap_explainer, base_instance_2d)
+        
+        base_lime_sample = [v["feature"] for v in base_lime_explanation]
+        base_shap_sample = [v["feature"] for v in base_shap_explanation]
+        exp_size = min(top_k, len(self.features) - 1)
+        
+        lime_data = {"jaccard": [], "spearman": []}
+        shap_data = {"jaccard": [], "spearman": []}
+        
+        for i in range(1, self.num_instance + 1):
+            example_instance_1d = self.X_test.iloc[i]
+            example_instance_2d = self.X_test.iloc[[i]]
+            new_lime_explanation = lime_explanation_form(self.model, self.lime_explainer, example_instance_1d)
+            new_shap_explanation = shap_explanation_form(self.model, self.shap_explainer, example_instance_2d)
+            
+            new_lime_sample = [v["feature"] for v in new_lime_explanation]
+            new_shap_sample = [v["feature"] for v in new_shap_explanation]
+            
+            lime_data["jaccard"].append(jaccard_similarity(base_lime_sample[:exp_size], new_lime_sample[:exp_size]))
+            shap_data["jaccard"].append(jaccard_similarity(base_shap_sample[:exp_size], new_shap_sample[:exp_size]))
+            
+            lime_data["spearman"].append(spearman_similarity(base_lime_sample, new_lime_sample))
+            shap_data["spearman"].append(spearman_similarity(base_shap_sample, new_shap_sample))
+
+        if display:
+            data_list = []
+            for i in range(self.num_instance):
+                data_list.append({"Explainer": "LIME", "Metric": "Jaccard", "Score": lime_data["jaccard"][i]})
+                data_list.append({"Explainer": "SHAP", "Metric": "Jaccard", "Score": shap_data["jaccard"][i]})
+                
+                data_list.append({"Explainer": "LIME", "Metric": "Spearman", "Score": lime_data["spearman"][i]})
+                data_list.append({"Explainer": "SHAP", "Metric": "Spearman", "Score": shap_data["spearman"][i]})
+                
+            df = pd.DataFrame(data_list)
+            
+            sns.set_theme(style="whitegrid")
+            fig, axes = plt.subplots(1, 2, figsize=(14, 6))
+            fig.suptitle("Consistency Test Between Explainers", fontsize=16, fontweight="bold")
+
+            df_jaccard = df[df["Metric"] == "Jaccard"]
+            df_spearman = df[df["Metric"] == "Spearman"]
+                        
+            sns.boxplot(data=df_jaccard, x="Explainer", y="Score", ax=axes[0], palette="Set2", showfliers=False, width=0.5)
+            sns.stripplot(data=df_jaccard, x="Explainer", y="Score", ax=axes[0], color=".2", size=4, alpha=0.6, jitter=True)
+            axes[0].set_title("Jaccard Similarity Distribution", fontsize=13)
+            axes[0].set_ylabel("Jaccard Score", fontsize=12)
+            axes[0].set_xlabel("Explainer Method", fontsize=12)
+            axes[0].set_ylim(-0.05, 1.05)
+            
+            sns.boxplot(data=df_spearman, x="Explainer", y="Score", ax=axes[1], palette="Set2", showfliers=False, width=0.5)
+            sns.stripplot(data=df_spearman, x="Explainer", y="Score", ax=axes[1], color=".2", size=4, alpha=0.6, jitter=True)
+            axes[1].set_title("Spearman Rank Correlation Distribution", fontsize=13)
+            axes[1].set_ylabel("Spearman Score", fontsize=12)
+            axes[1].set_xlabel("Explainer Method", fontsize=12)
+            axes[1].set_ylim(-1.05, 1.05)
+            
+            plt.tight_layout()
+            plt.show()
+
+        return (lime_data, shap_data)
+
+    def _get_lime_shap_attributions(self, instance_1d, instance_2d):
+        lime_attr_raw = lime_explanation_form(self.model, self.lime_explainer, instance_1d)
+        lime_features = np.array([v["feature"] for v in lime_attr_raw])
+        lime_scores = np.array([v["absolute score"] for v in lime_attr_raw])
+
+        shap_attr_raw = shap_explanation_form(self.model, self.shap_explainer, instance_2d)
+        shap_features = np.array([v["feature"] for v in shap_attr_raw])
+        shap_scores = np.array([v["absolute score"] for v in shap_attr_raw])
+
+        return (lime_features, lime_scores), (shap_features, shap_scores)
+
+    def robustness_test(self, noise_std=0.01, display=False, top_k=5):
+        lime_rob = {"jaccard": [], "spearman": []}
+        shap_rob = {"jaccard": [], "spearman": []}
+
+        for i in range(self.num_instance):
+            inst_1d = self.X_test.iloc[i].copy()
+            inst_2d = self.X_test.iloc[[i]].copy()
+
+            (l_f, _), (s_f, _) = self._get_lime_shap_attributions(inst_1d, inst_2d)
+
+            numeric_cols = inst_2d.select_dtypes(include=["float64", "int64"]).columns
+            inst_1d_noisy = inst_1d.copy()
+            inst_1d_noisy[numeric_cols] += np.random.normal(0, noise_std, len(numeric_cols))
+            inst_2d_noisy = inst_1d_noisy.to_frame().T
+
+            (l_f_n, _), (s_f_n, _) = self._get_lime_shap_attributions(inst_1d_noisy, inst_2d_noisy)
+
+            exp_size = min(top_k, len(self.features) - 1)
+            lime_rob["jaccard"].append(jaccard_similarity(list(l_f)[:exp_size], list(l_f_n)[:exp_size]))
+            shap_rob["jaccard"].append(jaccard_similarity(list(s_f)[:exp_size], list(s_f_n)[:exp_size]))
+
+            lime_rob["spearman"].append(spearman_similarity(list(l_f), list(l_f_n)))
+            shap_rob["spearman"].append(spearman_similarity(list(s_f), list(s_f_n)))
+
+        if display:
+            data_list = []
+            for i in range(self.num_instance):
+                data_list.append({"Explainer": "LIME", "Metric": "Jaccard", "Score": lime_rob["jaccard"][i]})
+                data_list.append({"Explainer": "SHAP", "Metric": "Jaccard", "Score": shap_rob["jaccard"][i]})
+                
+                data_list.append({"Explainer": "LIME", "Metric": "Spearman", "Score": lime_rob["spearman"][i]})
+                data_list.append({"Explainer": "SHAP", "Metric": "Spearman", "Score": shap_rob["spearman"][i]})
+                
+            df = pd.DataFrame(data_list)
+            
+            sns.set_theme(style="whitegrid")
+            fig, axes = plt.subplots(1, 2, figsize=(14, 6))
+            fig.suptitle("Robustness Test Between Explainers", fontsize=16, fontweight="bold")
+            
+            df_jaccard = df[df["Metric"] == "Jaccard"]
+            df_spearman = df[df["Metric"] == "Spearman"]
+            
+            sns.boxplot(data=df_jaccard, x="Explainer", y="Score", ax=axes[0], palette="Set2", showfliers=False, width=0.5)
+            sns.stripplot(data=df_jaccard, x="Explainer", y="Score", ax=axes[0], color=".2", size=4, alpha=0.6, jitter=True)
+            axes[0].set_title("Jaccard Similarity Distribution", fontsize=13)
+            axes[0].set_ylabel("Jaccard Score", fontsize=12)
+            axes[0].set_xlabel("Explainer Method", fontsize=12)
+            axes[0].set_ylim(-0.05, 1.05)
+            
+            sns.boxplot(data=df_spearman, x="Explainer", y="Score", ax=axes[1], palette="Set2", showfliers=False, width=0.5)
+            sns.stripplot(data=df_spearman, x="Explainer", y="Score", ax=axes[1], color=".2", size=4, alpha=0.6, jitter=True)
+            axes[1].set_title("Spearman Rank Correlation Distribution", fontsize=13)
+            axes[1].set_ylabel("Spearman Score", fontsize=12)
+            axes[1].set_xlabel("Explainer Method", fontsize=12)
+            axes[1].set_ylim(-1.05, 1.05)
+            
+            plt.tight_layout()
+            plt.show()
+        
+        return lime_rob, shap_rob
+
+    def sensitivity_test(self, noise_std=0.01, display=False):
+        sensitivity_data = {"LIME": [], "SHAP": []}
+
+        for i in range(self.num_instance):
+            inst_1d = self.X_test.iloc[i].copy()
+            inst_2d = self.X_test.iloc[[i]].copy()
+
+            (_, l_s), (_, s_s) = self._get_lime_shap_attributions(inst_1d, inst_2d)
+
+            numeric_cols = inst_2d.select_dtypes(include=["float64", "int64"]).columns
+            inst_1d_noisy = inst_1d.copy()
+            inst_1d_noisy[numeric_cols] += np.random.normal(0, noise_std, len(numeric_cols))
+            inst_2d_noisy = inst_1d_noisy.to_frame().T
+
+            (_, l_s_n), (_, s_s_n) = self._get_lime_shap_attributions(inst_1d_noisy, inst_2d_noisy)
+
+            sensitivity_data["LIME"].append(np.linalg.norm(l_s - l_s_n))
+            sensitivity_data["SHAP"].append(np.linalg.norm(s_s - s_s_n))
+
+        if display:
+            df = pd.DataFrame(sensitivity_data).melt(var_name="Explainer", value_name="Sensitivity")
+            plt.figure(figsize=(8, 5))
+            sns.boxplot(data=df, x="Explainer", y="Sensitivity", palette="Set2", showfliers=False, width=0.5)
+            sns.stripplot(data=df, x="Explainer", y="Sensitivity", color=".2", size=5, alpha=0.6, jitter=True)
+            plt.title("Sensitivity Test")
+            plt.ylabel("L2 Norm of Score Differences")
+            plt.tight_layout()
+            plt.show()
+
+        return sensitivity_data
+
+    def fidelity_test(self, display=False, top_k=5):
+        lime_fid = {"ABPC score": [], "LOCO score": [], "ABPC trending": [], "LOCO trending": []}
+        shap_fid = {"ABPC score": [], "LOCO score": [], "ABPC trending": [], "LOCO trending": []}
+        baseline_vector = self.X_train.median()
+
+        for i in range(self.num_instance):
+            inst_1d = self.X_test.iloc[i]
+            inst_2d = self.X_test.iloc[[i]]
+
+            (l_f, l_s), (s_f, s_s) = self._get_lime_shap_attributions(inst_1d, inst_2d)
+
+            exp_size = min(top_k, len(self.features) - 1)
+
+            scores, trending = ABPC(self.model, inst_2d, l_f[:exp_size], l_s[:exp_size], baseline_vector)
+            lime_fid["ABPC score"].append(scores)
+            lime_fid["ABPC trending"].append(trending)
+
+            scores, trending = ABPC(self.model, inst_2d, s_f[:exp_size], s_s[:exp_size], baseline_vector)
+            shap_fid["ABPC score"].append(scores)
+            shap_fid["ABPC trending"].append(trending)
+
+            scores, trending = LOCO(self.model, inst_2d, l_f[:exp_size], l_s[:exp_size], baseline_vector, self.X_train, self.y_train)
+            lime_fid["LOCO score"].append(scores)
+            lime_fid["LOCO trending"].append(trending)
+
+            scores, trending = LOCO(self.model, inst_2d, s_f[:exp_size], s_s[:exp_size], baseline_vector, self.X_train, self.y_train)
+            shap_fid["LOCO score"].append(scores)
+            shap_fid["LOCO trending"].append(trending)
+
+        if display:
+            data_list = []
+            for i in range(self.num_instance):
+                data_list.append({"Explainer": "LIME", "Metric": "ABPC", "Score": lime_fid["ABPC score"][i]})
+                data_list.append({"Explainer": "SHAP", "Metric": "ABPC", "Score": shap_fid["ABPC score"][i]})
+                data_list.append({"Explainer": "LIME", "Metric": "LOCO", "Score": lime_fid["LOCO score"][i]})
+                data_list.append({"Explainer": "SHAP", "Metric": "LOCO", "Score": shap_fid["LOCO score"][i]})
+                
+            df_box = pd.DataFrame(data_list)
+            
+            mean_lime_abpc = np.mean(lime_fid["ABPC trending"], axis=0)
+            mean_shap_abpc = np.mean(shap_fid["ABPC trending"], axis=0)
+            mean_lime_loco = np.mean(lime_fid["LOCO trending"], axis=0)
+            mean_shap_loco = np.mean(shap_fid["LOCO trending"], axis=0)
+
+            trend_data = []
+            for k_idx in range(exp_size):
+                k_val = k_idx + 1
+                trend_data.append({"Explainer": "LIME", "Metric": "ABPC", "k": k_val, "Mean Score": mean_lime_abpc[k_idx]})
+                trend_data.append({"Explainer": "SHAP", "Metric": "ABPC", "k": k_val, "Mean Score": mean_shap_abpc[k_idx]})
+                trend_data.append({"Explainer": "LIME", "Metric": "LOCO", "k": k_val, "Mean Score": mean_lime_loco[k_idx]})
+                trend_data.append({"Explainer": "SHAP", "Metric": "LOCO", "k": k_val, "Mean Score": mean_shap_loco[k_idx]})
+                
+            df_trend = pd.DataFrame(trend_data)
+            
+            sns.set_theme(style="whitegrid")
+            fig, axes = plt.subplots(2, 2, figsize=(14, 12))
+            fig.suptitle("Fidelity/Faithfulness Evaluation", fontsize=16, fontweight="bold")
+            
+            df_abpc_box = df_box[df_box["Metric"] == "ABPC"]
+            df_loco_box = df_box[df_box["Metric"] == "LOCO"]
+            
+            sns.boxplot(data=df_abpc_box, x="Explainer", y="Score", ax=axes[0, 0], hue="Explainer", palette="Set2", showfliers=False, width=0.5, legend=False)
+            sns.stripplot(data=df_abpc_box, x="Explainer", y="Score", ax=axes[0, 0], color=".2", size=4, alpha=0.6, jitter=True)
+            axes[0, 0].set_title("ABPC Distribution (Overall)", fontsize=13)
+            axes[0, 0].set_ylabel("Overall ABPC Score", fontsize=12)
+            axes[0, 0].set_xlabel("Explainer Method", fontsize=12)
+            
+            sns.boxplot(data=df_loco_box, x="Explainer", y="Score", ax=axes[0, 1], hue="Explainer", palette="Set2", showfliers=False, width=0.5, legend=False)
+            sns.stripplot(data=df_loco_box, x="Explainer", y="Score", ax=axes[0, 1], color=".2", size=4, alpha=0.6, jitter=True)
+            axes[0, 1].set_title("LOCO Distribution (Overall)", fontsize=13)
+            axes[0, 1].set_ylabel("Overall LOCO Score", fontsize=12)
+            axes[0, 1].set_xlabel("Explainer Method", fontsize=12)
+        
+            df_abpc_trend = df_trend[df_trend["Metric"] == "ABPC"]
+            df_loco_trend = df_trend[df_trend["Metric"] == "LOCO"]
+            
+            sns.lineplot(data=df_abpc_trend, x="k", y="Mean Score", hue="Explainer", marker="o", ax=axes[1, 0], palette="Set2")
+            axes[1, 0].set_title("ABPC Trend (Mean over Instances)", fontsize=13)
+            axes[1, 0].set_ylabel("Mean Cumulative ABPC", fontsize=12)
+            axes[1, 0].set_xlabel("Number of Masked Features (k)", fontsize=12)
+            axes[1, 0].set_xticks(range(1, exp_size + 1))
+            
+            sns.lineplot(data=df_loco_trend, x="k", y="Mean Score", hue="Explainer", marker="o", ax=axes[1, 1], palette="Set2")
+            axes[1, 1].set_title("LOCO Trend (Mean over Instances)", fontsize=13)
+            axes[1, 1].set_ylabel("Mean Cumulative LOCO", fontsize=12)
+            axes[1, 1].set_xlabel("Number of Masked Features (k)", fontsize=12)
+            axes[1, 1].set_xticks(range(1, exp_size + 1))
+            
+            plt.tight_layout()
+            plt.show()
+        
+        return lime_fid, shap_fid
+
+class ExplainerUser:
     pass

@@ -221,7 +221,7 @@ class UtilityAlignedTabularExplainer(UtilityAlignedExplainer):
             )
         )
 
-    def extract_attribution(self, x_instance):
+    def extract_utility_attribution(self, x_instance):
         self.attributions = []
         for f in self.features:
             probs = None
