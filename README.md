@@ -8,4 +8,5 @@ The structure of the framework:
 - `reduced_empirical_work_tabular.py`: This file represents the reduced empirical studies between LIME and SHAP.
 
 The aim of this empirical study: Measure the consistency, robustness, sensitivity, fidelity/faithfulness, causal validity and causal decision utility of explanations created from LIME, SHAP and Utility-aligned Explainer.
+
 The aim of the reduced version: Focus on the consistency, robustness, sensitivity and fidelity/faithfulness.
