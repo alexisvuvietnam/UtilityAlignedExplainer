@@ -179,6 +179,11 @@ def spearman_similarity(A, B):
     assert C != set(), "There is no similarity to compare"
     return 1 - (6 * sum((A.index(x) - B.index(x))**2 for x in C)) / max(len(A) * (len(A)**2 - 1), 1e-16)
 
+def fairness_metric(explanation, sensitive_features):
+    if set(explanation) & set(sensitive_features) == set():
+        return 0.0
+    return len(set(explanation) & set(sensitive_features)) / len(set(sensitive_features))
+
 class CausalModel:
 
     def __init__(self, features, actions):
