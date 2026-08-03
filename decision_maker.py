@@ -772,11 +772,11 @@ class ReducedExplainerTester:
             inst_1d = self.X_test.iloc[i]
             inst_2d = self.X_test.iloc[[i]]
 
-            (_, l_s), (_, s_s) = self._get_lime_shap_attributions(inst_1d, inst_2d)
+            (l_f, _), (s_f, _) = self._get_lime_shap_attributions(inst_1d, inst_2d)
 
             for seed, lime_explainer in self.lime_explainers.items():
-                fairness_data[f"LIME (Seed: {seed})"].append(fairness_metric(l_s[seed], sensitive_features))
-            fairness_data["SHAP"].append(fairness_metric(s_s, sensitive_features))
+                fairness_data[f"LIME (Seed: {seed})"].append(fairness_metric(l_f[seed], sensitive_features))
+            fairness_data["SHAP"].append(fairness_metric(s_f, sensitive_features))
 
         if display:
             df = pd.DataFrame(fairness_data).melt(var_name="Explainer", value_name="Fairness Score")
