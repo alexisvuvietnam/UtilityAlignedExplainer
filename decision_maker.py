@@ -6,6 +6,7 @@ import numpy as np
 import seaborn as sns
 import shap
 from utils import *
+from xgboost import XGBClassifier
 
 class ExplainerTester:
 
@@ -25,9 +26,12 @@ class ExplainerTester:
 
     ### XAI EMPIRICAL TESTS FROM HERE
     def consistency_test(self, display=False, top_k=5):
-        base_instance_1d = self.X_test.iloc[0]
-        base_instance_2d = self.X_test.iloc[[0]]
-        base_causal_explanation = self.causal_explainer.explain_instance(base_instance_2d)
+        base_instance_1d = self.X_test.iloc[0].copy()
+        base_instance_2d = self.X_test.iloc[[0]].copy()
+        
+        base_causal_instance = base_instance_1d if isinstance(self.model, XGBClassifier) else base_instance_2d
+        base_causal_explanation = self.causal_explainer.explain_instance(base_causal_instance)
+        
         base_lime_explanations = dict()
         for seed, lime_explainer in self.lime_explainers.items():
             base_lime_explanation = lime_explanation_form(self.model, lime_explainer, base_instance_1d)
@@ -44,14 +48,17 @@ class ExplainerTester:
         
         causal_data = {"jaccard": [], "spearman": []}
         lime_datas = dict()
-        for seed, lime_explainer in self.lime_explainers.items():
+        for seed in self.lime_explainers:
             lime_datas[seed] = {"jaccard": [], "spearman": []}
         shap_data = {"jaccard": [], "spearman": []}
         
         for i in range(1, self.num_instance + 1):
-            example_instance_1d = self.X_test.iloc[i]
-            example_instance_2d = self.X_test.iloc[[i]]
-            new_causal_explanation = self.causal_explainer.explain_instance(example_instance_2d)
+            example_instance_1d = self.X_test.iloc[i].copy()
+            example_instance_2d = self.X_test.iloc[[i]].copy()
+            
+            example_causal_instance = example_instance_1d if isinstance(self.model, XGBClassifier) else example_instance_2d
+            new_causal_explanation = self.causal_explainer.explain_instance(example_causal_instance)
+            
             new_lime_explanations = dict()
             for seed, lime_explainer in self.lime_explainers.items():
                 new_lime_explanation = lime_explanation_form(self.model, lime_explainer, example_instance_1d)
@@ -135,24 +142,26 @@ class ExplainerTester:
     def robustness_test(self, noise_std=0.01, display=False, top_k=5):
         causal_rob = {"jaccard": [], "spearman": []}
         lime_robs = dict()
-        for seed, lime_explainer in self.lime_explainers.items():
+        for seed in self.lime_explainers:
             lime_robs[seed] = {"jaccard": [], "spearman": []}
         shap_rob = {"jaccard": [], "spearman": []}
 
         for i in range(self.num_instance):
             inst_1d = self.X_test.iloc[i].copy()
             inst_2d = self.X_test.iloc[[i]].copy()
-
-            proto_exp = self.causal_explainer.explain_instance(inst_2d)
+            
+            inst_causal = inst_1d if isinstance(self.model, XGBClassifier) else inst_2d
+            proto_exp = self.causal_explainer.explain_instance(inst_causal)
             p_f = np.array([v["features"] for v in proto_exp])
             (l_f, _), (s_f, _) = self._get_lime_shap_attributions(inst_1d, inst_2d)
 
             numeric_cols = inst_2d.select_dtypes(include=["float64", "int64"]).columns
-            inst_1d_noisy = inst_1d.copy()
-            inst_1d_noisy[numeric_cols] += np.random.normal(0, noise_std, len(numeric_cols))
-            inst_2d_noisy = inst_1d_noisy.to_frame().T
-
-            proto_exp_noisy = self.causal_explainer.explain_instance(inst_2d_noisy)
+            inst_2d_noisy = inst_2d.copy()
+            inst_2d_noisy[numeric_cols] += np.random.normal(0, noise_std, len(numeric_cols))
+            inst_1d_noisy = inst_2d_noisy.iloc[0].copy()
+            
+            inst_causal_noisy = inst_1d_noisy if isinstance(self.model, XGBClassifier) else inst_2d_noisy
+            proto_exp_noisy = self.causal_explainer.explain_instance(inst_causal_noisy)
             p_f_n = np.array([v["features"] for v in proto_exp_noisy])
             (l_f_n, _), (s_f_n, _) = self._get_lime_shap_attributions(inst_1d_noisy, inst_2d_noisy)
 
@@ -184,7 +193,7 @@ class ExplainerTester:
             
             sns.set_theme(style="whitegrid")
             fig, axes = plt.subplots(1, 2, figsize=(20, 6))
-            fig.suptitle("Robustness Test Between Explainers", fontsize=16, fontweight="bold")
+            fig.suptitle(f"Robustness Test Between Explainers: Noise std = {noise_std}", fontsize=16, fontweight="bold")
             
             df_jaccard = df[df["Metric"] == "Jaccard"]
             df_spearman = df[df["Metric"] == "Spearman"]
@@ -210,28 +219,30 @@ class ExplainerTester:
 
     def sensitivity_test(self, noise_std=0.01, display=False):
         sensitivity_data = {"Utility-aligned": [], "SHAP": []}
-        for seed, lime_explainer in self.lime_explainers.items():
+        for seed in self.lime_explainers:
             sensitivity_data[f"LIME (Seed: {seed})"] = []
 
         for i in range(self.num_instance):
             inst_1d = self.X_test.iloc[i].copy()
             inst_2d = self.X_test.iloc[[i]].copy()
 
-            proto_exp = self.causal_explainer.explain_instance(inst_2d)
+            inst_causal = inst_1d if isinstance(self.model, XGBClassifier) else inst_2d
+            proto_exp = self.causal_explainer.explain_instance(inst_causal)
             p_s = np.array([v["utility score"] for v in proto_exp])
             (_, l_s), (_, s_s) = self._get_lime_shap_attributions(inst_1d, inst_2d)
 
             numeric_cols = inst_2d.select_dtypes(include=["float64", "int64"]).columns
-            inst_1d_noisy = inst_1d.copy()
-            inst_1d_noisy[numeric_cols] += np.random.normal(0, noise_std, len(numeric_cols))
-            inst_2d_noisy = inst_1d_noisy.to_frame().T
+            inst_2d_noisy = inst_2d.copy()
+            inst_2d_noisy[numeric_cols] += np.random.normal(0, noise_std, len(numeric_cols))
+            inst_1d_noisy = inst_2d_noisy.iloc[0].copy()
 
-            proto_exp_noisy = self.causal_explainer.explain_instance(inst_2d_noisy)
+            inst_causal_noisy = inst_1d_noisy if isinstance(self.model, XGBClassifier) else inst_2d_noisy
+            proto_exp_noisy = self.causal_explainer.explain_instance(inst_causal_noisy)
             p_s_n = np.array([v["utility score"] for v in proto_exp_noisy])
             (_, l_s_n), (_, s_s_n) = self._get_lime_shap_attributions(inst_1d_noisy, inst_2d_noisy)
 
             sensitivity_data["Utility-aligned"].append(np.linalg.norm(p_s - p_s_n))
-            for seed, lime_explainer in self.lime_explainers.items():
+            for seed in self.lime_explainers:
                 sensitivity_data[f"LIME (Seed: {seed})"].append(np.linalg.norm(l_s[seed] - l_s_n[seed]))
             sensitivity_data["SHAP"].append(np.linalg.norm(s_s - s_s_n))
 
@@ -240,7 +251,7 @@ class ExplainerTester:
             plt.figure(figsize=(14, 5))
             sns.boxplot(data=df, x="Explainer", y="Sensitivity", palette="Set2", showfliers=False, width=0.5)
             sns.stripplot(data=df, x="Explainer", y="Sensitivity", color=".2", size=5, alpha=0.6, jitter=True)
-            plt.title("Sensitivity Test")
+            plt.title(f"Sensitivity Test: Noise std = {noise_std}")
             plt.ylabel("L2 Norm of Score Differences")
             plt.tight_layout()
             plt.show()
@@ -250,7 +261,7 @@ class ExplainerTester:
     def fidelity_test(self, display=False, top_k=5):
         causal_fid = {"Local MORF": [], "Local LOCO": []}
         lime_fids = dict()
-        for seed, lime_explainer in self.lime_explainers.items():
+        for seed in self.lime_explainers:
             lime_fids[f"LIME (Seed: {seed})"] = {"Local MORF": [], "Local LOCO": []}
         shap_fid = {"Local MORF": [], "Local LOCO": []}
         baseline_vector = self.X_train.median()
@@ -259,7 +270,8 @@ class ExplainerTester:
             inst_1d = self.X_test.iloc[i]
             inst_2d = self.X_test.iloc[[i]]
 
-            proto_exp = self.causal_explainer.explain_instance(inst_2d)
+            inst_causal = inst_1d if isinstance(self.model, XGBClassifier) else inst_2d
+            proto_exp = self.causal_explainer.explain_instance(inst_causal)
             p_f = np.array([v["features"] for v in proto_exp])
             p_s = np.array([v["utility score"] for v in proto_exp])
             (l_f, l_s), (s_f, s_s) = self._get_lime_shap_attributions(inst_1d, inst_2d)
@@ -267,14 +279,14 @@ class ExplainerTester:
             exp_size = min(top_k, len(self.features) - 1, len(p_f) - 1)
 
             causal_fid["Local MORF"].append(local_MoRF(self.model, inst_2d, np.array(list(ast.literal_eval(p_f[0]))), p_s[0], baseline_vector, exp_size))
-            for seed, lime_explainer in self.lime_explainers.items():
+            for seed in self.lime_explainers:
                 lime_fids[f"LIME (Seed: {seed})"]["Local MORF"].append(local_MoRF(self.model, inst_2d, l_f[seed][:exp_size], l_s[seed][:exp_size], baseline_vector, exp_size))
             shap_fid["Local MORF"].append(local_MoRF(self.model, inst_2d, s_f[:exp_size], s_s[:exp_size], baseline_vector, exp_size))
 
-            causal_fid["Local LOCO"].append(local_LOCO(self.model, inst_2d, np.array(list(ast.literal_eval(p_f[0]))), p_s[0], baseline_vector, exp_size, self.X_train, self.y_train))
-            for seed, lime_explainer in self.lime_explainers.items():
-                lime_fids[f"LIME (Seed: {seed})"]["Local LOCO"].append(local_LOCO(self.model, inst_2d, l_f[seed][:exp_size], l_s[seed][:exp_size], baseline_vector, exp_size, self.X_train, self.y_train))
-            shap_fid["Local LOCO"].append(local_LOCO(self.model, inst_2d, s_f[:exp_size], s_s[:exp_size], baseline_vector, exp_size, self.X_train, self.y_train))
+            causal_fid["Local LOCO"].append(local_LOCO(self.model, inst_2d, np.array(list(ast.literal_eval(p_f[0]))), p_s[0], exp_size, self.X_train, self.y_train))
+            for seed in self.lime_explainers:
+                lime_fids[f"LIME (Seed: {seed})"]["Local LOCO"].append(local_LOCO(self.model, inst_2d, l_f[seed][:exp_size], l_s[seed][:exp_size], exp_size, self.X_train, self.y_train))
+            shap_fid["Local LOCO"].append(local_LOCO(self.model, inst_2d, s_f[:exp_size], s_s[:exp_size], exp_size, self.X_train, self.y_train))
 
         if display:
             data_list = []
@@ -319,7 +331,7 @@ class ExplainerTester:
 
     def causality_test(self, display=False):
         causality_data = {"Utility-aligned": [], "SHAP": []}
-        for seed, lime_explainer in self.lime_explainers.items():
+        for seed in self.lime_explainers:
             causality_data[f"LIME (Seed: {seed})"] = []
 
         for i in range(self.num_instance):
@@ -333,7 +345,7 @@ class ExplainerTester:
             causality_data["Utility-aligned"].append(1.0)
 
             lime_cvs = dict()
-            for seed, lime_explainer in self.lime_explainers.items():
+            for seed in self.lime_explainers:
                 lime_cv = self.causal_model.causal_consistency(l_f[seed][:num_critical])
                 lime_cvs[seed] = lime_cv
                 causality_data[f"LIME (Seed: {seed})"].append(lime_cv)
@@ -355,31 +367,33 @@ class ExplainerTester:
 
     def utility_test(self, display=False):
         utility_data = {"Utility-aligned": [], "SHAP": []}
-        for seed, lime_explainer in self.lime_explainers.items():
+        for seed in self.lime_explainers:
             utility_data[f"LIME (Seed: {seed})"] = []
 
         for i in range(self.num_instance):
             inst_1d = self.X_test.iloc[i]
             inst_2d = self.X_test.iloc[[i]]
         
-            p_f = self.causal_explainer.explain_instance(inst_2d)
+            inst_causal = inst_1d if isinstance(self.model, XGBClassifier) else inst_2d
+            p_f = self.causal_explainer.explain_instance(inst_causal)
             best_proto_features = list(ast.literal_eval(p_f[0]["features"]))
+            length = len(best_proto_features)
             (l_f, _), (s_f, _) = self._get_lime_shap_attributions(inst_1d, inst_2d)
     
             prototype_probs = estimate_interventional_probability_tabular(self.model, self.X_train, inst_2d, best_proto_features)
             utility_data["Utility-aligned"].append(np.max(self.utility_matrix @ prototype_probs.T))
 
             cv_s_f = []
-            for i in s_f:
+            for i in s_f[:length]:
                 if self.causal_model.backdoor_satisfaction(i):
                     cv_s_f.append(i)
             shap_probs = estimate_interventional_probability_tabular(self.model, self.X_train, inst_2d, cv_s_f)
             utility_data["SHAP"].append(np.max(self.utility_matrix @ shap_probs.T))
 
             cv_l_fs = dict()
-            for seed, lime_explainer in self.lime_explainers.items():
+            for seed in self.lime_explainers:
                 cv_l_fs[seed] = []
-                for i in l_f[seed]:
+                for i in l_f[seed][:length]:
                     if self.causal_model.backdoor_satisfaction(i):
                         cv_l_fs[seed].append(i)
             for seed, cv_l_f in cv_l_fs.items():
@@ -400,19 +414,20 @@ class ExplainerTester:
 
     def fairness_test(self, sensitive_features, display=False):
         fairness_data = {"Utility-aligned": [], "SHAP": []}
-        for seed, lime_explainer in self.lime_explainers.items():
+        for seed in self.lime_explainers:
             fairness_data[f"LIME (Seed: {seed})"] = []
 
         for i in range(self.num_instance):
             inst_1d = self.X_test.iloc[i]
             inst_2d = self.X_test.iloc[[i]]
 
-            p_f = self.causal_explainer.explain_instance(inst_2d)
+            inst_causal = inst_1d if isinstance(self.model, XGBClassifier) else inst_2d
+            p_f = self.causal_explainer.explain_instance(inst_causal)
             best_proto_features = list(ast.literal_eval(p_f[0]["features"]))
             (l_f, _), (s_f, _) = self._get_lime_shap_attributions(inst_1d, inst_2d)
 
             fairness_data["Utility-aligned"].append(fairness_metric(best_proto_features, sensitive_features))
-            for seed, lime_explainer in self.lime_explainers.items():
+            for seed in self.lime_explainers:
                 fairness_data[f"LIME (Seed: {seed})"].append(fairness_metric(l_f[seed], sensitive_features))
             fairness_data["SHAP"].append(fairness_metric(s_f, sensitive_features))
 
@@ -427,10 +442,13 @@ class ExplainerTester:
             plt.show()
         return fairness_data
 
-    def do_all_tests(self, sensitive_features, noise_std=0.01, display=False, top_k=5):
+    def do_all_tests(self, sensitive_features, noise_stds=[0.1, 0.5, 1.0], display=False, top_k=5):
         consistency_results = self.consistency_test(display=display, top_k=top_k)
-        robustness_results = self.robustness_test(noise_std=noise_std, display=display, top_k=top_k)
-        sensitivity_results = self.sensitivity_test(noise_std=noise_std, display=display)
+        robustness_results = []
+        sensitivity_results = []
+        for noise_std in noise_stds:
+            robustness_results.append(self.robustness_test(noise_std=noise_std, display=display, top_k=top_k))
+            sensitivity_results.append(self.sensitivity_test(noise_std=noise_std, display=display))
         fidelity_results = self.fidelity_test(display=display, top_k=top_k)
         causality_results = self.causality_test(display=display)
         utility_results = self.utility_test(display=display)
@@ -440,6 +458,234 @@ class ExplainerTester:
             "consistency": consistency_results,
             "robustness": robustness_results,
             "sensitivity": sensitivity_results,
+            "fidelity": fidelity_results,
+            "causality": causality_results,
+            "utility": utility_results,
+            "fairness": fairness_results
+        }
+
+class HeuristicExplainerTester:
+
+    def __init__(self, model, features, actions, causal_model, utility_matrix, X_train, y_train, X_test, lime_explainers, shap_explainer, n_samples=100):
+        self.model = model
+        self.features = features
+        self.actions = actions
+        self.causal_model = causal_model
+        self.utility_matrix = utility_matrix
+        self.X_train = X_train
+        self.y_train = y_train
+        self.X_test = X_test
+        self.lime_explainers = lime_explainers
+        self.shap_explainer = shap_explainer
+        self.causal_explainer = UtilityAlignedTabularExplainer(self.model, self.X_train, self.features, self.actions, self.causal_model, self.utility_matrix)
+        self.num_instance = min(len(self.X_test), n_samples)
+
+    def _get_lime_shap_attributions(self, instance_1d, instance_2d):
+        lime_features_dict = dict()
+        lime_scores_dict = dict()
+        for seed, lime_explainer in self.lime_explainers.items():
+            lime_attr_raw = lime_explanation_form(self.model, lime_explainer, instance_1d)
+            lime_features = np.array([v["feature"] for v in lime_attr_raw])
+            lime_scores = np.array([v["absolute score"] for v in lime_attr_raw])
+            lime_features_dict[seed] = lime_features
+            lime_scores_dict[seed] = lime_scores
+
+        shap_attr_raw = shap_explanation_form(self.model, self.shap_explainer, instance_2d)
+        shap_features = np.array([v["feature"] for v in shap_attr_raw])
+        shap_scores = np.array([v["absolute score"] for v in shap_attr_raw])
+
+        return (lime_features_dict, lime_scores_dict), (shap_features, shap_scores)
+
+    def fidelity_test(self, display=False, top_k=5):
+        causal_fid = {"Local MORF": [], "Local LOCO": []}
+        lime_fids = dict()
+        for seed, _ in self.lime_explainers.items():
+            lime_fids[f"LIME (Seed: {seed})"] = {"Local MORF": [], "Local LOCO": []}
+        shap_fid = {"Local MORF": [], "Local LOCO": []}
+        baseline_vector = self.X_train.median()
+
+        for i in range(self.num_instance):
+            inst_1d = self.X_test.iloc[i]
+            inst_2d = self.X_test.iloc[[i]]
+
+            inst_causal = inst_1d if isinstance(self.model, XGBClassifier) else inst_2d
+            proto_exp = self.causal_explainer.explain_instance_by_heuristic(inst_causal)
+            p_f = proto_exp["features"]
+            p_s = proto_exp["utility score"]
+            (l_f, l_s), (s_f, s_s) = self._get_lime_shap_attributions(inst_1d, inst_2d)
+
+            exp_size = min(top_k, len(self.features) - 1, len(p_f) - 1)
+
+            causal_fid["Local MORF"].append(local_MoRF(self.model, inst_2d, np.array(list(ast.literal_eval(p_f))), p_s, baseline_vector, exp_size))
+            for seed, _ in self.lime_explainers.items():
+                lime_fids[f"LIME (Seed: {seed})"]["Local MORF"].append(local_MoRF(self.model, inst_2d, l_f[seed][:exp_size], l_s[seed][:exp_size], baseline_vector, exp_size))
+            shap_fid["Local MORF"].append(local_MoRF(self.model, inst_2d, s_f[:exp_size], s_s[:exp_size], baseline_vector, exp_size))
+
+            causal_fid["Local LOCO"].append(local_LOCO(self.model, inst_2d, np.array(list(ast.literal_eval(p_f))), p_s, exp_size, self.X_train, self.y_train))
+            for seed, _ in self.lime_explainers.items():
+                lime_fids[f"LIME (Seed: {seed})"]["Local LOCO"].append(local_LOCO(self.model, inst_2d, l_f[seed][:exp_size], l_s[seed][:exp_size], exp_size, self.X_train, self.y_train))
+            shap_fid["Local LOCO"].append(local_LOCO(self.model, inst_2d, s_f[:exp_size], s_s[:exp_size], exp_size, self.X_train, self.y_train))
+
+        if display:
+            data_list = []
+            for i in range(self.num_instance):
+                data_list.append({"Explainer": "Utility-aligned", "Metric": "Local MORF", "Score": causal_fid["Local MORF"][i]})
+                for seed, lime_fid in lime_fids.items():
+                    data_list.append({"Explainer": seed, "Metric": "Local MORF", "Score": lime_fid["Local MORF"][i]})
+                data_list.append({"Explainer": "SHAP", "Metric": "Local MORF", "Score": shap_fid["Local MORF"][i]})
+
+                data_list.append({"Explainer": "Utility-aligned", "Metric": "Local LOCO", "Score": causal_fid["Local LOCO"][i]})
+                for seed, lime_fid in lime_fids.items():
+                    data_list.append({"Explainer": seed, "Metric": "Local LOCO", "Score": lime_fid["Local LOCO"][i]})
+                data_list.append({"Explainer": "SHAP", "Metric": "Local LOCO", "Score": shap_fid["Local LOCO"][i]})
+                
+            df = pd.DataFrame(data_list)
+            
+            sns.set_theme(style="whitegrid")
+            fig, axes = plt.subplots(1, 2, figsize=(20, 6))
+            fig.suptitle("Fidelity Test Between Explainers", fontsize=16, fontweight="bold")
+            
+            df_morf = df[df["Metric"] == "Local MORF"]
+            df_loco = df[df["Metric"] == "Local LOCO"]
+            
+            sns.boxplot(data=df_morf, x="Explainer", y="Score", ax=axes[0], palette="Set2", showfliers=False, width=0.5)
+            sns.stripplot(data=df_morf, x="Explainer", y="Score", ax=axes[0], color=".2", size=4, alpha=0.6, jitter=True)
+            axes[0].set_title("Local MORF Distribution", fontsize=13)
+            axes[0].set_ylabel("Local MORF Score", fontsize=12)
+            axes[0].set_xlabel("Explainer Method", fontsize=12)
+            axes[0].set_ylim(-0.05, 1.05)
+            
+            sns.boxplot(data=df_loco, x="Explainer", y="Score", ax=axes[1], palette="Set2", showfliers=False, width=0.5)
+            sns.stripplot(data=df_loco, x="Explainer", y="Score", ax=axes[1], color=".2", size=4, alpha=0.6, jitter=True)
+            axes[1].set_title("Local LOCO Distribution", fontsize=13)
+            axes[1].set_ylabel("Local LOCO Score", fontsize=12)
+            axes[1].set_xlabel("Explainer Method", fontsize=12)
+            axes[1].set_ylim(-1.05, 1.05)
+            
+            plt.tight_layout()
+            plt.show()
+        
+        return causal_fid, lime_fids, shap_fid
+
+    def causality_test(self, display=False):
+        causality_data = {"Utility-aligned": [], "SHAP": []}
+        for seed, _ in self.lime_explainers.items():
+            causality_data[f"LIME (Seed: {seed})"] = []
+
+        for i in range(self.num_instance):
+            inst_1d = self.X_test.iloc[i]
+            inst_2d = self.X_test.iloc[[i]]
+
+            num_critical = len(self.causal_explainer.critical_features)
+
+            (l_f, _), (s_f, _) = self._get_lime_shap_attributions(inst_1d, inst_2d)
+
+            causality_data["Utility-aligned"].append(1.0)
+
+            lime_cvs = dict()
+            for seed, _ in self.lime_explainers.items():
+                lime_cv = self.causal_model.causal_consistency(l_f[seed][:num_critical])
+                lime_cvs[seed] = lime_cv
+                causality_data[f"LIME (Seed: {seed})"].append(lime_cv)
+
+            shap_cv = self.causal_model.causal_consistency(s_f[:num_critical])
+            causality_data["SHAP"].append(shap_cv)
+
+        if display:
+            df = pd.DataFrame(causality_data).melt(var_name="Explainer", value_name="Causal Consistency Score")
+            plt.figure(figsize=(14, 5))
+            sns.boxplot(data=df, x="Explainer", y="Causal Consistency Score", palette="Set2", showfliers=False, width=0.5)
+            sns.stripplot(data=df, x="Explainer", y="Causal Consistency Score", color=".2", size=5, alpha=0.6, jitter=True)
+            plt.title("Causality Test (Causal Consistency)")
+            plt.ylabel("Causal Consistency Score (Higher is better)")
+            plt.tight_layout()
+            plt.show()
+
+        return causality_data
+
+    def utility_test(self, display=False):
+        utility_data = {"Utility-aligned": [], "SHAP": []}
+        for seed, _ in self.lime_explainers.items():
+            utility_data[f"LIME (Seed: {seed})"] = []
+
+        for i in range(self.num_instance):
+            inst_1d = self.X_test.iloc[i]
+            inst_2d = self.X_test.iloc[[i]]
+        
+            inst_causal = inst_1d if isinstance(self.model, XGBClassifier) else inst_2d
+            prototype_exp = self.causal_explainer.explain_instance_by_heuristic(inst_causal)
+            p_f = list(ast.literal_eval(prototype_exp["features"]))
+            length = len(p_f)
+            (l_f, _), (s_f, _) = self._get_lime_shap_attributions(inst_1d, inst_2d)
+    
+            prototype_probs = estimate_interventional_probability_tabular(self.model, self.X_train, inst_2d, p_f)
+            utility_data["Utility-aligned"].append(np.max(self.utility_matrix @ prototype_probs.T))
+
+            cv_s_f = []
+            for i in s_f[:length]:
+                if self.causal_model.backdoor_satisfaction(i):
+                    cv_s_f.append(i)
+            shap_probs = estimate_interventional_probability_tabular(self.model, self.X_train, inst_2d, cv_s_f)
+            utility_data["SHAP"].append(np.max(self.utility_matrix @ shap_probs.T))
+
+            cv_l_fs = dict()
+            for seed, _ in self.lime_explainers.items():
+                cv_l_fs[seed] = []
+                for i in l_f[seed][:length]:
+                    if self.causal_model.backdoor_satisfaction(i):
+                        cv_l_fs[seed].append(i)
+            for seed, cv_l_f in cv_l_fs.items():
+                lime_probs = estimate_interventional_probability_tabular(self.model, self.X_train, inst_2d, cv_l_f)
+                utility_data[f"LIME (Seed: {seed})"].append(np.max(self.utility_matrix @ lime_probs.T))
+
+        if display:
+            df = pd.DataFrame(utility_data).melt(var_name="Explainer", value_name="Utility Score")
+            plt.figure(figsize=(14, 5))
+            sns.boxplot(data=df, x="Explainer", y="Utility Score", palette="Set2", showfliers=False, width=0.5)
+            sns.stripplot(data=df, x="Explainer", y="Utility Score", color=".2", size=5, alpha=0.6, jitter=True)
+            plt.title("Utility Test (Interventional Probability)")
+            plt.ylabel("Utility Score (Higher is better)")
+            plt.tight_layout()
+            plt.show()
+
+        return utility_data
+
+    def fairness_test(self, sensitive_features, display=False):
+        fairness_data = {"Utility-aligned": [], "SHAP": []}
+        for seed, _ in self.lime_explainers.items():
+            fairness_data[f"LIME (Seed: {seed})"] = []
+
+        for i in range(self.num_instance):
+            inst_1d = self.X_test.iloc[i]
+            inst_2d = self.X_test.iloc[[i]]
+
+            inst_causal = inst_1d if isinstance(self.model, XGBClassifier) else inst_2d
+            prototype_exp = self.causal_explainer.explain_instance_by_heuristic(inst_causal)
+            p_f = list(ast.literal_eval(prototype_exp["features"]))
+            (l_f, _), (s_f, _) = self._get_lime_shap_attributions(inst_1d, inst_2d)
+
+            fairness_data["Utility-aligned"].append(fairness_metric(p_f, sensitive_features))
+            for seed, _ in self.lime_explainers.items():
+                fairness_data[f"LIME (Seed: {seed})"].append(fairness_metric(l_f[seed], sensitive_features))
+            fairness_data["SHAP"].append(fairness_metric(s_f, sensitive_features))
+
+        if display:
+            df = pd.DataFrame(fairness_data).melt(var_name="Explainer", value_name="Fairness Score")
+            plt.figure(figsize=(14, 5))
+            sns.boxplot(data=df, x="Explainer", y="Fairness Score", palette="Set2", showfliers=False, width=0.5)
+            sns.stripplot(data=df, x="Explainer", y="Fairness Score", color=".2", size=5, alpha=0.6, jitter=True)
+            plt.title("Fairness Test (Interventional Probability)")
+            plt.ylabel("Fairness Score (Lower is better)")
+            plt.tight_layout()
+            plt.show()
+        return fairness_data
+
+    def do_all_tests(self, sensitive_features, display=False, top_k=5):
+        fidelity_results = self.fidelity_test(display=display, top_k=top_k)
+        causality_results = self.causality_test(display=display)
+        utility_results = self.utility_test(display=display)
+        fairness_results = self.fairness_test(sensitive_features=sensitive_features, display=display)
+        return {
             "fidelity": fidelity_results,
             "causality": causality_results,
             "utility": utility_results,
@@ -476,7 +722,7 @@ class ReducedExplainerTester:
         exp_size = min(top_k, len(self.features) - 1)
         
         lime_datas = dict()
-        for seed, lime_explainer in self.lime_explainers.items():
+        for seed in self.lime_explainers:
             lime_datas[seed] = {"jaccard": [], "spearman": []}
         shap_data = {"jaccard": [], "spearman": []}
         
@@ -560,7 +806,7 @@ class ReducedExplainerTester:
 
     def robustness_test(self, noise_std=0.01, display=False, top_k=5):
         lime_robs = dict()
-        for seed, lime_explainer in self.lime_explainers.items():
+        for seed in self.lime_explainers:
             lime_robs[seed] = {"jaccard": [], "spearman": []}
         shap_rob = {"jaccard": [], "spearman": []}
 
@@ -571,9 +817,9 @@ class ReducedExplainerTester:
             (l_f, _), (s_f, _) = self._get_lime_shap_attributions(inst_1d, inst_2d)
 
             numeric_cols = inst_2d.select_dtypes(include=["float64", "int64"]).columns
-            inst_1d_noisy = inst_1d.copy()
-            inst_1d_noisy[numeric_cols] += np.random.normal(0, noise_std, len(numeric_cols))
-            inst_2d_noisy = inst_1d_noisy.to_frame().T
+            inst_2d_noisy = inst_2d.copy()
+            inst_2d_noisy[numeric_cols] += np.random.normal(0, noise_std, len(numeric_cols))
+            inst_1d_noisy = inst_2d_noisy.iloc[0].copy()
 
             (l_f_n, _), (s_f_n, _) = self._get_lime_shap_attributions(inst_1d_noisy, inst_2d_noisy)
 
@@ -601,7 +847,7 @@ class ReducedExplainerTester:
             
             sns.set_theme(style="whitegrid")
             fig, axes = plt.subplots(1, 2, figsize=(20, 6))
-            fig.suptitle("Robustness Test Between Explainers", fontsize=16, fontweight="bold")
+            fig.suptitle(f"Robustness Test Between Explainers: Noise std = {noise_std}", fontsize=16, fontweight="bold")
             
             df_jaccard = df[df["Metric"] == "Jaccard"]
             df_spearman = df[df["Metric"] == "Spearman"]
@@ -627,7 +873,7 @@ class ReducedExplainerTester:
 
     def sensitivity_test(self, noise_std=0.01, display=False):
         sensitivity_data = {"SHAP": []}
-        for seed, lime_explainer in self.lime_explainers.items():
+        for seed in self.lime_explainers:
             sensitivity_data[f"LIME (Seed: {seed})"] = []
 
         for i in range(self.num_instance):
@@ -637,13 +883,13 @@ class ReducedExplainerTester:
             (_, l_s), (_, s_s) = self._get_lime_shap_attributions(inst_1d, inst_2d)
 
             numeric_cols = inst_2d.select_dtypes(include=["float64", "int64"]).columns
-            inst_1d_noisy = inst_1d.copy()
-            inst_1d_noisy[numeric_cols] += np.random.normal(0, noise_std, len(numeric_cols))
-            inst_2d_noisy = inst_1d_noisy.to_frame().T
+            inst_2d_noisy = inst_2d.copy()
+            inst_2d_noisy[numeric_cols] += np.random.normal(0, noise_std, len(numeric_cols))
+            inst_1d_noisy = inst_2d_noisy.iloc[0].copy()
 
             (_, l_s_n), (_, s_s_n) = self._get_lime_shap_attributions(inst_1d_noisy, inst_2d_noisy)
 
-            for seed, lime_explainer in self.lime_explainers.items():
+            for seed in self.lime_explainers:
                 sensitivity_data[f"LIME (Seed: {seed})"].append(np.linalg.norm(l_s[seed] - l_s_n[seed]))
             sensitivity_data["SHAP"].append(np.linalg.norm(s_s - s_s_n))
 
@@ -652,7 +898,7 @@ class ReducedExplainerTester:
             plt.figure(figsize=(14, 5))
             sns.boxplot(data=df, x="Explainer", y="Sensitivity", palette="Set2", showfliers=False, width=0.5)
             sns.stripplot(data=df, x="Explainer", y="Sensitivity", color=".2", size=5, alpha=0.6, jitter=True)
-            plt.title("Sensitivity Test")
+            plt.title(f"Sensitivity Test: Noise std = {noise_std}")
             plt.ylabel("L2 Norm of Score Differences")
             plt.tight_layout()
             plt.show()
@@ -661,7 +907,7 @@ class ReducedExplainerTester:
 
     def fidelity_test(self, display=False, top_k=5):
         lime_fids = dict()
-        for seed, lime_explainer in self.lime_explainers.items():
+        for seed in self.lime_explainers:
             lime_fids[f"LIME (Seed: {seed})"] = {"ABPC score": [], "LOCO score": [], "ABPC trending": [], "LOCO trending": []}
         shap_fid = {"ABPC score": [], "LOCO score": [], "ABPC trending": [], "LOCO trending": []}
         baseline_vector = self.X_train.median()
@@ -674,7 +920,7 @@ class ReducedExplainerTester:
 
             exp_size = min(top_k, len(self.features) - 1)
 
-            for seed, lime_explainer in self.lime_explainers.items():
+            for seed in self.lime_explainers:
                 scores, trending = ABPC(self.model, inst_2d, l_f[seed][:exp_size], l_s[seed][:exp_size], baseline_vector)
                 lime_fids[f"LIME (Seed: {seed})"]["ABPC score"].append(scores)
                 lime_fids[f"LIME (Seed: {seed})"]["ABPC trending"].append(trending)
@@ -683,12 +929,12 @@ class ReducedExplainerTester:
             shap_fid["ABPC score"].append(scores)
             shap_fid["ABPC trending"].append(trending)
 
-            for seed, lime_explainer in self.lime_explainers.items():
-                scores, trending = LOCO(self.model, inst_2d, l_f[seed][:exp_size], l_s[seed][:exp_size], baseline_vector, self.X_train, self.y_train)
+            for seed in self.lime_explainers:
+                scores, trending = LOCO(self.model, inst_2d, l_f[seed][:exp_size], l_s[seed][:exp_size], self.X_train, self.y_train)
                 lime_fids[f"LIME (Seed: {seed})"]["LOCO score"].append(scores)
                 lime_fids[f"LIME (Seed: {seed})"]["LOCO trending"].append(trending)
 
-            scores, trending = LOCO(self.model, inst_2d, s_f[:exp_size], s_s[:exp_size], baseline_vector, self.X_train, self.y_train)
+            scores, trending = LOCO(self.model, inst_2d, s_f[:exp_size], s_s[:exp_size], self.X_train, self.y_train)
             shap_fid["LOCO score"].append(scores)
             shap_fid["LOCO trending"].append(trending)
 
@@ -765,7 +1011,7 @@ class ReducedExplainerTester:
 
     def fairness_test(self, sensitive_features, display=False):
         fairness_data = {"SHAP": []}
-        for seed, lime_explainer in self.lime_explainers.items():
+        for seed in self.lime_explainers:
             fairness_data[f"LIME (Seed: {seed})"] = []
 
         for i in range(self.num_instance):
@@ -774,7 +1020,7 @@ class ReducedExplainerTester:
 
             (l_f, _), (s_f, _) = self._get_lime_shap_attributions(inst_1d, inst_2d)
 
-            for seed, lime_explainer in self.lime_explainers.items():
+            for seed in self.lime_explainers:
                 fairness_data[f"LIME (Seed: {seed})"].append(fairness_metric(l_f[seed], sensitive_features))
             fairness_data["SHAP"].append(fairness_metric(s_f, sensitive_features))
 
@@ -790,10 +1036,13 @@ class ReducedExplainerTester:
 
         return fairness_data
 
-    def do_all_tests(self, sensitive_features, noise_std=0.01, display=False, top_k=5):
+    def do_all_tests(self, sensitive_features, noise_stds=[0.1, 0.5, 1.0], display=False, top_k=5):
         consistency_results = self.consistency_test(display=display, top_k=top_k)
-        robustness_results = self.robustness_test(noise_std=noise_std, display=display, top_k=top_k)
-        sensitivity_results = self.sensitivity_test(noise_std=noise_std, display=display)
+        robustness_results = []
+        sensitivity_results = []
+        for noise_std in noise_stds:
+            robustness_results.append(self.robustness_test(noise_std=noise_std, display=display, top_k=top_k))
+            sensitivity_results.append(self.sensitivity_test(noise_std=noise_std, display=display))
         fidelity_results = self.fidelity_test(display=display, top_k=top_k)
         fairness_results = self.fairness_test(sensitive_features=sensitive_features, display=display)
     
@@ -805,5 +1054,113 @@ class ReducedExplainerTester:
             "fairness": fairness_results
         }
 
-class ExplainerUser:
-    pass
+class UtilityAlignedExplainerUser:
+    def __init__(self, model, features, actions, X_train, X_test, causal_model, utility_matrix, n_samples=100, information_method="shannon", information_bound=np.inf):
+        self.model = model
+        self.features = features
+        self.actions = actions
+        self.X_train = X_train
+        self.X_test = X_test
+        self.causal_model = causal_model
+        self.utility_matrix = utility_matrix
+        self.n_samples = n_samples
+        self.information_method = information_method
+        self.information_bound = information_bound
+        self.explainer = UtilityAlignedTabularExplainer(
+            model = self.model,
+            X_train = self.X_train,
+            features = self.features,
+            actions = self.actions,
+            causal_model = self.causal_model,
+            utility_matrix = self.utility_matrix,
+            information_method = information_method,
+            information_bound = self.information_bound
+        )
+
+    def similarity_measurement(self, display=False):
+        jaccard_scores = []
+        utility_diffs = []
+        info_diffs = []
+        
+        num_instances = min(len(self.X_test), self.n_samples)
+        instance_indices = list(range(1, num_instances + 1))
+        
+        for i in range(num_instances):
+            inst_1d = self.X_test.iloc[i]
+            
+            optimal_exps = self.explainer.explain_instance(inst_1d)
+            best_optimal = optimal_exps[0]
+            opt_f = list(ast.literal_eval(best_optimal["features"]))
+            opt_u = best_optimal["utility score"]
+            opt_i = best_optimal["information score"]
+            
+            best_heuristic = self.explainer.explain_instance_by_heuristic(inst_1d)
+            heur_f_raw = best_heuristic["features"]
+            if isinstance(heur_f_raw, str):
+                heur_f = list(ast.literal_eval(heur_f_raw))
+            else:
+                heur_f = list(heur_f_raw)
+                
+            heur_u = best_heuristic["utility score"]
+            heur_i = best_heuristic["information score"]
+            
+            jaccard_scores.append(jaccard_similarity(opt_f, heur_f))
+            utility_diffs.append(abs(opt_u - heur_u))
+            info_diffs.append(abs(opt_i - heur_i))
+            
+        results_data = {
+            "jaccard_similarity": jaccard_scores,
+            "utility_difference": utility_diffs,
+            "information_difference": info_diffs
+        }
+        
+        if display:
+            
+            df_jaccard = pd.DataFrame({"Metric": "Jaccard Similarity", "Score": jaccard_scores, "Instance Index": instance_indices})
+            df_utility = pd.DataFrame({"Metric": "Utility Abs Diff", "Score": utility_diffs, "Instance Index": instance_indices})
+            df_info = pd.DataFrame({"Metric": "Information Abs Diff", "Score": info_diffs, "Instance Index": instance_indices})
+            
+            sns.set_theme(style="whitegrid")
+            
+            fig, axes = plt.subplots(2, 3, figsize=(20, 12))
+            fig.suptitle("Similarity Measurement: Optimal vs Heuristic Search", fontsize=16, fontweight="bold")
+            
+            sns.boxplot(data=df_jaccard, x="Metric", y="Score", ax=axes[0, 0], palette="Set2", showfliers=False, width=0.5)
+            sns.stripplot(data=df_jaccard, x="Metric", y="Score", ax=axes[0, 0], color=".2", size=4, alpha=0.6, jitter=True)
+            axes[0, 0].set_title("Feature Sets Jaccard Similarity", fontsize=13)
+            axes[0, 0].set_ylim(-0.05, 1.05)
+            axes[0, 0].set_ylabel("Jaccard Score", fontsize=12)
+            axes[0, 0].set_xlabel("")
+            
+            sns.boxplot(data=df_utility, x="Metric", y="Score", ax=axes[0, 1], palette="Set2", showfliers=False, width=0.5)
+            sns.stripplot(data=df_utility, x="Metric", y="Score", ax=axes[0, 1], color=".2", size=4, alpha=0.6, jitter=True)
+            axes[0, 1].set_title("Utility Score Absolute Difference", fontsize=13)
+            axes[0, 1].set_ylabel("Absolute Difference", fontsize=12)
+            axes[0, 1].set_xlabel("")
+            
+            sns.boxplot(data=df_info, x="Metric", y="Score", ax=axes[0, 2], palette="Set2", showfliers=False, width=0.5)
+            sns.stripplot(data=df_info, x="Metric", y="Score", ax=axes[0, 2], color=".2", size=4, alpha=0.6, jitter=True)
+            axes[0, 2].set_title("Information Score Absolute Difference", fontsize=13)
+            axes[0, 2].set_ylabel("Absolute Difference", fontsize=12)
+            axes[0, 2].set_xlabel("")
+
+            sns.lineplot(data=df_jaccard, x="Instance Index", y="Score", ax=axes[1, 0], marker="o", color="#66c2a5", alpha=0.8)
+            axes[1, 0].set_title("Jaccard Trend across Instances", fontsize=13)
+            axes[1, 0].set_ylim(-0.05, 1.05)
+            axes[1, 0].set_ylabel("Jaccard Score", fontsize=12)
+            axes[1, 0].set_xlabel("Instance Index", fontsize=12)
+            
+            sns.lineplot(data=df_utility, x="Instance Index", y="Score", ax=axes[1, 1], marker="o", color="#fc8d62", alpha=0.8)
+            axes[1, 1].set_title("Utility Difference Trend across Instances", fontsize=13)
+            axes[1, 1].set_ylabel("Absolute Difference", fontsize=12)
+            axes[1, 1].set_xlabel("Instance Index", fontsize=12)
+            
+            sns.lineplot(data=df_info, x="Instance Index", y="Score", ax=axes[1, 2], marker="o", color="#8da0cb", alpha=0.8)
+            axes[1, 2].set_title("Information Difference Trend across Instances", fontsize=13)
+            axes[1, 2].set_ylabel("Absolute Difference", fontsize=12)
+            axes[1, 2].set_xlabel("Instance Index", fontsize=12)
+            
+            plt.tight_layout()
+            plt.show()
+            
+        return results_data

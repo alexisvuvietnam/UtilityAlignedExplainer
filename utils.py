@@ -1,5 +1,6 @@
 import itertools
 import numpy as np
+import pandas as pd
 import pyagrum as gum
 from scipy.stats import spearmanr
 from sklearn.base import BaseEstimator, clone
@@ -90,24 +91,33 @@ def ABPC(model, x_instance, features, attributions, baseline_vector):
     le, lerf_cumul = LeRF(model, x_instance, features, attributions, baseline_vector)
     return mo - le, morf_cumul - lerf_cumul
 
-def LOCO(model, x_instance, features, attributions, baseline_vector, X_train, y_train):
+def LOCO(model, x_instance, features, attributions, X_train, y_train):
     rank = np.argsort(attributions)[::-1]
-    ranked_features = features[rank]
+    ranked_features = np.array(features)[rank]
     
-    res = model.predict(x_instance)
+    x_inst_2d = x_instance.to_frame().T if isinstance(x_instance, pd.Series) else (
+        x_instance.reshape(1, -1) if isinstance(x_instance, np.ndarray) and x_instance.ndim == 1 else x_instance
+    )
+    
+    res = model.predict(x_inst_2d)
     target_class = res[0] if isinstance(res, (np.ndarray, list)) else res
-    original_prob = _get_target_prob(model, x_instance, target_class)
+    original_prob = _get_target_prob(model, x_inst_2d, target_class)
     
-    instance = x_instance.copy()
     loco_score = 0.0
     loco_cumul = []
-
+    
     X_train_clone = X_train.copy()
+    instance = x_instance.copy()
     
     for k in range(len(features)):
-        feature_to_mask = ranked_features[k]
-        X_train_clone[feature_to_mask] = baseline_vector[feature_to_mask]
-        instance[feature_to_mask] = baseline_vector[feature_to_mask]
+        feature_to_drop = ranked_features[k]
+        
+        if isinstance(X_train_clone, pd.DataFrame):
+            X_train_clone = X_train_clone.drop(columns=[feature_to_drop])
+            instance = instance.drop(columns=[feature_to_drop]) if isinstance(instance, pd.DataFrame) else instance.drop(labels=[feature_to_drop])
+        else:
+            X_train_clone = np.delete(X_train_clone, feature_to_drop, axis=1)
+            instance = np.delete(instance, feature_to_drop, axis=1 if instance.ndim == 2 else 0)
 
         if isinstance(model, BaseEstimator):
             cloned_model = clone(model)
@@ -118,7 +128,11 @@ def LOCO(model, x_instance, features, attributions, baseline_vector, X_train, y_
             raise ValueError("Unsupported model type. Please provide a scikit-learn estimator or an XGBoost classifier.")
 
         cloned_model.fit(X_train_clone, y_train)    
-        new_prob = _get_target_prob(cloned_model, instance, target_class)
+        
+        inst_2d = instance.to_frame().T if isinstance(instance, pd.Series) else (
+            instance.reshape(1, -1) if isinstance(instance, np.ndarray) and instance.ndim == 1 else instance
+        )
+        new_prob = _get_target_prob(cloned_model, inst_2d, target_class)
 
         loco_score += (original_prob - new_prob)
         loco_cumul.append(original_prob - new_prob)
@@ -142,21 +156,24 @@ def local_MoRF(model, x_instance, features, attributions, baseline_vector, k):
         
     return original_prob - new_prob
 
-def local_LOCO(model, x_instance, features, attributions, baseline_vector, k, X_train, y_train):
+def local_LOCO(model, x_instance, features, attributions, k, X_train, y_train):
     rank = np.argsort(attributions)[::-1]
-    ranked_features = features[rank][:k]
+    ranked_features = np.array(features)[rank][:k]
     
-    res = model.predict(x_instance)
+    x_inst_2d = x_instance.to_frame().T if isinstance(x_instance, pd.Series) else (
+        x_instance.reshape(1, -1) if isinstance(x_instance, np.ndarray) and x_instance.ndim == 1 else x_instance
+    )
+    
+    res = model.predict(x_inst_2d)
     target_class = res[0] if isinstance(res, (np.ndarray, list)) else res
-    original_prob = _get_target_prob(model, x_instance, target_class)
+    original_prob = _get_target_prob(model, x_inst_2d, target_class)
     
-    instance = x_instance.copy()
-
-    X_train_clone = X_train.copy()
-    
-    for feature_to_mask in ranked_features:
-        X_train_clone[feature_to_mask] = baseline_vector[feature_to_mask]
-        instance[feature_to_mask] = baseline_vector[feature_to_mask]
+    if isinstance(X_train, pd.DataFrame):
+        X_train_clone = X_train.drop(columns=ranked_features)
+        instance = x_instance.drop(columns=ranked_features) if isinstance(x_instance, pd.DataFrame) else x_instance.drop(labels=ranked_features)
+    else:
+        X_train_clone = np.delete(X_train, ranked_features, axis=1)
+        instance = np.delete(x_instance, ranked_features, axis=1 if x_instance.ndim == 2 else 0)
 
     if isinstance(model, BaseEstimator):
         cloned_model = clone(model)
@@ -167,7 +184,11 @@ def local_LOCO(model, x_instance, features, attributions, baseline_vector, k, X_
         raise ValueError("Unsupported model type. Please provide a scikit-learn estimator or an XGBoost classifier.")
 
     cloned_model.fit(X_train_clone, y_train)    
-    new_prob = _get_target_prob(cloned_model, instance, target_class)
+    
+    inst_2d = instance.to_frame().T if isinstance(instance, pd.Series) else (
+        instance.reshape(1, -1) if isinstance(instance, np.ndarray) and instance.ndim == 1 else instance
+    )
+    new_prob = _get_target_prob(cloned_model, inst_2d, target_class)
         
     return original_prob - new_prob
 
