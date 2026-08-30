@@ -95,19 +95,24 @@ def _get_target_prob(model, instance, target_class):
     probs = model.predict_proba(instance)
     return probs[0, target_class] if probs.ndim == 2 else probs[target_class]
 
-def MoRF(model, x_instance, features, attributions, baseline_vector):
+def MoRF(model, x_instance, features, attributions, baseline_vector, top_k = None):
     rank = np.argsort(attributions)[::-1]
     ranked_features = features[rank]
     
     res = model.predict(x_instance)
     target_class = res[0] if isinstance(res, (np.ndarray, list)) else res
     original_prob = _get_target_prob(model, x_instance, target_class)
+
+    if top_k is None:
+        length = len(features)
+    else:
+        length = min(top_k, len(features))
     
     instance = x_instance.copy()
     morf_score = 0.0
     morf_cumul = []
     
-    for k in range(len(features)):
+    for k in range(length):
         feature_to_mask = ranked_features[k]
         instance[feature_to_mask] = baseline_vector[feature_to_mask]
         
@@ -115,9 +120,9 @@ def MoRF(model, x_instance, features, attributions, baseline_vector):
         morf_score += (original_prob - new_prob)
         morf_cumul.append(original_prob - new_prob)
 
-    return morf_score / (len(features) + 1), np.array(morf_cumul)
+    return morf_score / length, np.array(morf_cumul)
     
-def LeRF(model, x_instance, features, attributions, baseline_vector):
+def LeRF(model, x_instance, features, attributions, baseline_vector, top_k = None):
     rank = np.argsort(attributions)
     ranked_features = features[rank]
     
@@ -128,8 +133,13 @@ def LeRF(model, x_instance, features, attributions, baseline_vector):
     instance = x_instance.copy()
     lerf_score = 0.0
     lerf_cumul = []
+
+    if top_k is None:
+        length = len(features)
+    else:
+        length = min(top_k, len(features))
     
-    for k in range(len(features)):
+    for k in range(length):
         feature_to_mask = ranked_features[k]
         instance[feature_to_mask] = baseline_vector[feature_to_mask]
         
@@ -137,14 +147,14 @@ def LeRF(model, x_instance, features, attributions, baseline_vector):
         lerf_score += (original_prob - new_prob)
         lerf_cumul.append(original_prob - new_prob)
 
-    return lerf_score / (len(features) + 1), np.array(lerf_cumul)
+    return lerf_score / length, np.array(lerf_cumul)
 
-def ABPC(model, x_instance, features, attributions, baseline_vector):
-    mo, morf_cumul = MoRF(model, x_instance, features, attributions, baseline_vector)
-    le, lerf_cumul = LeRF(model, x_instance, features, attributions, baseline_vector)
+def ABPC(model, x_instance, features, attributions, baseline_vector, top_k = None):
+    mo, morf_cumul = MoRF(model, x_instance, features, attributions, baseline_vector, top_k=top_k)
+    le, lerf_cumul = LeRF(model, x_instance, features, attributions, baseline_vector, top_k=top_k)
     return mo - le, morf_cumul - lerf_cumul
 
-def RoAR(model, x_instance, features, attributions, X_train, y_train):
+def RoAR(model, x_instance, features, attributions, X_train, y_train, X_val, y_val):
     rank = np.argsort(attributions)[::-1]
     ranked_features = np.array(features)[rank]
     
@@ -164,9 +174,11 @@ def RoAR(model, x_instance, features, attributions, X_train, y_train):
         
         if isinstance(X_train, pd.DataFrame):
             X_train_k = X_train.drop(columns=features_to_drop)
+            X_val_k = X_val.drop(columns=features_to_drop)
             instance_k = x_instance.drop(columns=features_to_drop) if isinstance(x_instance, pd.DataFrame) else x_instance.drop(labels=features_to_drop)
         else:
             X_train_k = np.delete(X_train, features_to_drop, axis=1)
+            X_val_k = np.delete(X_val, features_to_drop, axis=1)
             instance_k = np.delete(x_instance, features_to_drop, axis=1 if x_instance.ndim == 2 else 0)
 
         if isinstance(model, BaseEstimator):
@@ -177,7 +189,10 @@ def RoAR(model, x_instance, features, attributions, X_train, y_train):
         else:
             raise ValueError("Unsupported model type. Please provide a scikit-learn estimator or an XGBoost classifier.")
 
-        cloned_model.fit(X_train_k, y_train)    
+        if isinstance(cloned_model, xgb.XGBClassifier):
+            cloned_model.fit(X_train_k, y_train, eval_set=[(X_val_k, y_val)], verbose=False)
+        else:
+            cloned_model.fit(X_train_k, y_train)    
         
         inst_2d = instance_k.to_frame().T if isinstance(instance_k, pd.Series) else (
             instance_k.reshape(1, -1) if isinstance(instance_k, np.ndarray) and instance_k.ndim == 1 else instance_k
@@ -206,7 +221,7 @@ def local_MoRF(model, x_instance, features, attributions, baseline_vector, k):
         
     return original_prob - new_prob
 
-def local_RoAR(model, x_instance, features, attributions, k, X_train, y_train):
+def local_RoAR(model, x_instance, features, attributions, k, X_train, y_train, X_val, y_val):
     rank = np.argsort(attributions)[::-1]
     ranked_features = np.array(features)[rank][:k]
     
@@ -220,9 +235,11 @@ def local_RoAR(model, x_instance, features, attributions, k, X_train, y_train):
     
     if isinstance(X_train, pd.DataFrame):
         X_train_clone = X_train.drop(columns=ranked_features)
+        X_val_clone = X_val.drop(columns=ranked_features)
         instance = x_instance.drop(columns=ranked_features) if isinstance(x_instance, pd.DataFrame) else x_instance.drop(labels=ranked_features)
     else:
         X_train_clone = np.delete(X_train, ranked_features, axis=1)
+        X_val_clone = np.delete(X_val, ranked_features, axis=1)
         instance = np.delete(x_instance, ranked_features, axis=1 if x_instance.ndim == 2 else 0)
 
     if isinstance(model, BaseEstimator):
@@ -233,7 +250,10 @@ def local_RoAR(model, x_instance, features, attributions, k, X_train, y_train):
     else:
         raise ValueError("Unsupported model type. Please provide a scikit-learn estimator or an XGBoost classifier.")
 
-    cloned_model.fit(X_train_clone, y_train)    
+    if isinstance(cloned_model, xgb.XGBClassifier):
+        cloned_model.fit(X_train_clone, y_train, eval_set=[(X_val_clone, y_val)], verbose=False)
+    else:
+        cloned_model.fit(X_train_clone, y_train)     
     
     inst_2d = instance.to_frame().T if isinstance(instance, pd.Series) else (
         instance.reshape(1, -1) if isinstance(instance, np.ndarray) and instance.ndim == 1 else instance
@@ -258,7 +278,7 @@ def fairness_metric(explanation, sensitive_features):
         return 0.0
     return len(set(explanation) & set(sensitive_features)) / len(set(sensitive_features))
 
-class CausalModel:
+class CausalDAG:
 
     def __init__(self, features, actions):
         self.regimes = set(map(lambda x: f"F_{x}", features))

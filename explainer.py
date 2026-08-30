@@ -103,11 +103,11 @@ def top_k_shap_explanation_form(model, shap_explainer, x_instance_2d, importance
     return attribution[:top_k]
 
 class UtilityAlignedExplainer(ABC):
-    def __init__(self, model, X_train, *, actions, causal_model:CausalModel, utility_matrix, **kwargs):
-        assert set(actions) == causal_model.outcomes, "Invalid causal model"
+    def __init__(self, model, X_train, *, actions, causal_graph:CausalDAG, utility_matrix, **kwargs):
+        assert set(actions) == causal_graph.outcomes, "Invalid causal model"
         self.model = model
         self.actions = np.array(actions)
-        self.causal_model = causal_model
+        self.causal_graph = causal_graph
         self.utility_matrix = utility_matrix
         self.X_train = X_train
 
@@ -116,13 +116,13 @@ class UtilityAlignedExplainer(ABC):
         pass
 
 class UtilityAlignedTabularExplainer(UtilityAlignedExplainer):
-    def __init__(self, model, X_train, features, actions, causal_model:CausalModel, utility_matrix, base=np.e, ohe_group=None, **kwargs):
+    def __init__(self, model, X_train, features, actions, causal_graph:CausalDAG, utility_matrix, base=np.e, ohe_group=None, **kwargs):
         
         super().__init__(
             model,
             X_train, 
             actions=actions, 
-            causal_model=causal_model, 
+            causal_graph=causal_graph, 
             utility_matrix=utility_matrix,
             base=base
         )
@@ -136,7 +136,7 @@ class UtilityAlignedTabularExplainer(UtilityAlignedExplainer):
         # Global extraction
         self.critical_features = set()
         for f in self.features:
-            if self.causal_model.causal_validity(f):
+            if self.causal_graph.causal_validity(f):
                 self.critical_features.add(f)
 
     def explain_instance(self, x_instance):
@@ -148,11 +148,11 @@ class UtilityAlignedTabularExplainer(UtilityAlignedExplainer):
                     probs = estimate_interventional_probability_tabular(self.model, self.X_train, x_instance, self.ohe_group[f])
                 else:
                     probs = estimate_interventional_probability_tabular(self.model, self.X_train, x_instance, [f])
-                possible_actions = self.causal_model.possible_actions({f})
+                possible_actions = self.causal_graph.possible_actions({f})
                 element_mask = np.isin(self.actions, list(possible_actions))
                 action_indices = np.where(element_mask)[0]
                 expected_utility = np.max(self.utility_matrix[action_indices] @ probs.T)
-                attributions.append(decision_making_explanation_form(f, self.causal_model.extract_parents(f), probs, expected_utility, self.actions[np.argmax(self.utility_matrix[action_indices] @ probs.T)]))    
+                attributions.append(decision_making_explanation_form(f, self.causal_graph.extract_parents(f), probs, expected_utility, self.actions[np.argmax(self.utility_matrix[action_indices] @ probs.T)]))    
         attributions.sort(
             reverse=True,
             key=lambda e: e["utility score"]
@@ -175,9 +175,9 @@ class UtilityAlignedTabularExplainer(UtilityAlignedExplainer):
                 if f in self.ohe_group:
                     standard_e.remove(f)
                     standard_e += self.ohe_group[f]
-                parents = parents | self.causal_model.extract_parents(f)
+                parents = parents | self.causal_graph.extract_parents(f)
             probs = estimate_interventional_probability_tabular(self.model, self.X_train, x_instance, list(standard_e))
-            possible_actions = self.causal_model.possible_actions(e)
+            possible_actions = self.causal_graph.possible_actions(e)
             element_mask = np.isin(self.actions, list(possible_actions))
             action_indices = np.where(element_mask)[0]
             expected_utility = np.max(self.utility_matrix[action_indices] @ probs.T)
