@@ -178,6 +178,7 @@ class ExplainerTester:
             handles, labels = axs[0, 0].get_legend_handles_labels()
             fig.legend(handles, labels, bbox_to_anchor=(1.01, 0.95), loc='upper left')
             plt.tight_layout()
+            plt.savefig("rq1_1.svg", format="svg", bbox_inches="tight")
             plt.show()
             
         return feature_ranks
@@ -230,6 +231,7 @@ class ExplainerTester:
             handles, labels = axs[0, 0].get_legend_handles_labels()
             fig.legend(handles, labels, bbox_to_anchor=(1.01, 0.95), loc='upper left')
             plt.tight_layout()
+            plt.savefig("rq1_2.svg", format="svg", bbox_inches="tight")
             plt.show()
             
         return feature_ranks
@@ -311,27 +313,352 @@ class ExplainerTester:
             handles, labels = axs[0, 0].get_legend_handles_labels()
             fig.legend(handles, labels, bbox_to_anchor=(1.01, 0.95), loc='upper left')
             plt.tight_layout()
+            plt.savefig("rq1_3.svg", format="svg", bbox_inches="tight")
             plt.show()
             
         return feature_ranks
 
 class BaselineTester:
 
-    def __init__(self, name, model, features, actions, causal_graph, utility_matrix, X_train, y_train, X_val, y_val, X_test, lime_explainers, shap_explainer, random_seed=42, n_samples=100):
+    def __init__(self, name, model, features, classes, actions, causal_graph, X_train, y_train, X_val, y_val, X_test, lime_seeds=[0, 1, 2], random_seed=42, n_samples=100):
         self.name = name
         self.model = model
         self.features = features
+        self.classes = classes
         self.actions = actions
         self.causal_graph = causal_graph
-        self.utility_matrix = utility_matrix
         self.X_train = X_train
         self.y_train = y_train
         self.X_val = X_val
         self.y_val = y_val
         self.X_test = X_test
-        self.lime_explainers = lime_explainers
-        self.shap_explainer = shap_explainer
-        self.ciu_explainer = ciu.CIU(self.model.predict_proba, self.model.classes_, data=self.X_train, input_names=self.features, output_inds=self.model.classes_.tolist())
+        self.lime_explainers = dict()
+        for seed in lime_seeds:
+            self.lime_explainers[seed] = lime.lime_tabular.LimeTabularExplainer(training_data=self.X_train.values, feature_names=self.features, class_names=self.classes, random_state=seed)
+        self.shap_explainer = shap.Explainer(self.model.predict, X_train)
+        self.ciu_explainer = ciu.CIU(self.model.predict_proba, self.classes, data=self.X_train, input_names=self.features, output_inds=self.classes)
+        self.biased_utility_matrix = np.array([[100, 50]])
+        self.neutral_utility_matrix = np.array([[100, 100]])
+        self.biased_causal_explainer = UtilityAlignedTabularExplainer(self.model, self.X_train, self.features, self.actions, self.causal_graph, self.biased_utility_matrix)
+        self.neutral_causal_explainer = UtilityAlignedTabularExplainer(self.model, self.X_train, self.features, self.actions, self.causal_graph, self.neutral_utility_matrix)
+        self.random_seed = random_seed
+        self.num_instances = min(len(self.X_test), n_samples)
+        self.explanation_types  = ["Biased-utility Utility-aligned", "Neutral-utility Utility-aligned", "SHAP", "CI-based CIU", "CU-based CIU", "Influence-based CIU"] + [f"Seed-{s} LIME" for s in lime_seeds]
+
+    def _format_number_list(self, number):
+        if isinstance(number, int) or isinstance(number, float):
+            return [number]
+        
+        return number
+
+    def _explain_instances_feature(self, instance_1d, instance_2d):
+        explanations = {etype: [] for etype in self.explanation_types}
+
+        biased_explanation = self.biased_causal_explainer.explain_instance(instance_1d)
+        for feature_info in biased_explanation:
+            feature_name = feature_info['features']
+            explanations["Biased-utility Utility-aligned"].append(feature_name)
+
+        neutral_explanation = self.neutral_causal_explainer.explain_instance(instance_1d)
+        for feature_info in neutral_explanation:
+            feature_name = feature_info['features']
+            explanations["Neutral-utility Utility-aligned"].append(feature_name)
+
+        shap_exp = shap_explanation_form(self.model, self.shap_explainer, instance_2d)
+        for feature_info in shap_exp:
+            feature_name = feature_info['feature']
+            explanations["SHAP"].append(feature_name)
+
+        ci_exp = ci_based_CIU_explanation_form(self.ciu_explainer, instance_2d, [np.argmax(self.model.predict_proba(instance_2d)[0])])
+        for feature_info in ci_exp:
+            feature_name = feature_info['feature']
+            explanations["CI-based CIU"].append(feature_name)
+
+        cu_exp = cu_based_CIU_explanation_form(self.ciu_explainer, instance_2d, [np.argmax(self.model.predict_proba(instance_2d)[0])])
+        for feature_info in cu_exp:
+            feature_name = feature_info['feature']
+            explanations["CU-based CIU"].append(feature_name)
+
+        influence_exp = influence_based_CIU_explanation_form(self.ciu_explainer, instance_2d, [np.argmax(self.model.predict_proba(instance_2d)[0])])
+        for feature_info in influence_exp:
+            feature_name = feature_info['feature']
+            explanations["Influence-based CIU"].append(feature_name)
+
+        for seed, lime_explainer in self.lime_explainers.items():
+            lime_exp = lime_explanation_form(self.model, lime_explainer, instance_1d)
+            for feature_info in lime_exp:
+                feature_name = feature_info['feature']
+                explanations[f"Seed-{seed} LIME"].append(feature_name)
+
+        return explanations
+
+    def model_fidelity_test(self, display=False):
+        if isinstance(self.model, xgb.XGBClassifier):
+            corrupted_model = xgb.XGBClassifier()
+            corrupted_model.set_params(**self.model.get_params())
+        else:
+            corrupted_model = clone(self.model)
+        
+        np.random.seed(self.random_seed)
+        shuffled_y_train = np.random.permutation(self.y_train)
+                
+        if isinstance(corrupted_model, xgb.XGBClassifier):
+            corrupted_model.fit(self.X_train, shuffled_y_train, eval_set=[(self.X_val, self.y_val)], verbose=False)
+        else:
+            corrupted_model.fit(self.X_train, shuffled_y_train)
+
+        corrupted_lime_explainers = dict()
+        for seed in self.lime_explainers.keys():
+            corrupted_lime_explainers[seed] = lime.lime_tabular.LimeTabularExplainer(training_data=self.X_train.values, feature_names=self.features, class_names=self.classes, random_state=seed)
+
+        corrupted_shap_explainer = shap.Explainer(corrupted_model.predict, self.X_train)
+        corrupted_ciu_explainer = ciu.CIU(corrupted_model.predict_proba, self.classes, data=self.X_train, input_names=self.features, output_inds=self.classes)
+        corrupted_biased_causal_explainer = UtilityAlignedTabularExplainer(corrupted_model, self.X_train, self.features, self.actions, self.causal_graph, self.biased_utility_matrix)
+        corrupted_neutral_causal_explainer = UtilityAlignedTabularExplainer(corrupted_model, self.X_train, self.features, self.actions, self.causal_graph, self.neutral_utility_matrix)
+
+        all_datas = dict()
+        for explainer in self.explanation_types:
+            all_datas[explainer] = []
+        
+        for i in range(self.num_instances):
+            corrupted_explanations = {etype: [] for etype in self.explanation_types}
+            instance_1d = self.X_test.iloc[i]
+            instance_2d = self.X_test.iloc[[i]]
+            
+            original = self._explain_instances_feature(instance_1d, instance_2d)
+            
+            biased_explanation = corrupted_biased_causal_explainer.explain_instance(instance_1d)
+            for feature_info in biased_explanation:
+                feature_name = feature_info['features']
+                corrupted_explanations["Biased-utility Utility-aligned"].append(feature_name)
+
+            all_datas["Biased-utility Utility-aligned"].append(spearman_similarity(original["Biased-utility Utility-aligned"], corrupted_explanations["Biased-utility Utility-aligned"]))
+            
+            neutral_explanation = corrupted_neutral_causal_explainer.explain_instance(instance_1d)
+            for feature_info in neutral_explanation:
+                feature_name = feature_info['features']
+                corrupted_explanations["Neutral-utility Utility-aligned"].append(feature_name)
+
+            all_datas["Neutral-utility Utility-aligned"].append(spearman_similarity(original["Neutral-utility Utility-aligned"], corrupted_explanations["Neutral-utility Utility-aligned"]))
+            
+            shap_exp = shap_explanation_form(corrupted_model, corrupted_shap_explainer, instance_2d)
+            for feature_info in shap_exp:
+                feature_name = feature_info['feature']
+                corrupted_explanations["SHAP"].append(feature_name)
+
+            all_datas["SHAP"].append(spearman_similarity(original["SHAP"], corrupted_explanations["SHAP"]))
+            
+            ci_exp = ci_based_CIU_explanation_form(corrupted_ciu_explainer, instance_2d, [np.argmax(corrupted_model.predict_proba(instance_2d)[0])])
+            for feature_info in ci_exp:
+                feature_name = feature_info['feature']
+                corrupted_explanations["CI-based CIU"].append(feature_name)
+
+            all_datas["CI-based CIU"].append(spearman_similarity(original["CI-based CIU"], corrupted_explanations["CI-based CIU"]))
+            
+            cu_exp = cu_based_CIU_explanation_form(corrupted_ciu_explainer, instance_2d, [np.argmax(corrupted_model.predict_proba(instance_2d)[0])])
+            for feature_info in cu_exp:
+                feature_name = feature_info['feature']
+                corrupted_explanations["CU-based CIU"].append(feature_name)
+
+            all_datas["CU-based CIU"].append(spearman_similarity(original["CU-based CIU"], corrupted_explanations["CU-based CIU"]))
+        
+            influence_exp = influence_based_CIU_explanation_form(corrupted_ciu_explainer, instance_2d, [np.argmax(corrupted_model.predict_proba(instance_2d)[0])])
+            for feature_info in influence_exp:
+                feature_name = feature_info['feature']
+                corrupted_explanations["Influence-based CIU"].append(feature_name)
+
+            all_datas["Influence-based CIU"].append(spearman_similarity(original["Influence-based CIU"], corrupted_explanations["Influence-based CIU"]))
+
+            for seed, lime_explainer in self.lime_explainers.items():
+                lime_exp = lime_explanation_form(corrupted_model, lime_explainer, instance_1d)
+                for feature_info in lime_exp:
+                    feature_name = feature_info['feature']
+                    corrupted_explanations[f"Seed-{seed} LIME"].append(feature_name)
+
+                all_datas[f"Seed-{seed} LIME"].append(spearman_similarity(original[f"Seed-{seed} LIME"], corrupted_explanations[f"Seed-{seed} LIME"]))
+
+        if display:
+            df_plot = pd.DataFrame(all_datas)
+            plt.figure(figsize=(12, 6))
+            sns.boxplot(data=df_plot, palette="Set3", showfliers=False)
+            sns.stripplot(data=df_plot, color="black", alpha=0.4, jitter=True, size=3)
+            plt.title("Model Fidelity Test: Sanity Checks over Feature Rankings")
+            plt.ylabel("Spearman Similarity")
+            plt.xticks(rotation=45)
+            plt.grid(axis='y', linestyle='--', alpha=0.7)
+            plt.tight_layout()
+            plt.savefig("rq2_1.svg", format="svg", bbox_inches="tight")
+            plt.show()
+
+        return all_datas
+
+    def descriptive_faithfulness_test(self, top_k=5, display=False):
+        assert top_k < len(self.biased_causal_explainer.critical_features), "top_k should be less than the number of critical features in the causal graph."
+        all_datas = dict()
+        for explainer in self.explanation_types:
+            all_datas[explainer] = []
+
+        for i in range(self.num_instances):
+            instance_1d = self.X_test.iloc[i]
+            instance_2d = self.X_test.iloc[[i]]
+            original = self._explain_instances_feature(instance_1d, instance_2d)
+
+            for explainer in self.explanation_types:
+                explanation = original[explainer][:top_k]
+                all_datas[explainer].append(top_k_RoAR(self.model, instance_2d, explanation, self.X_train, self.y_train, self.X_val, self.y_val).tolist())
+
+        if display:
+            plot_data = []
+            for explainer, drop_curves in all_datas.items():
+                for i, drop_curve in enumerate(drop_curves):
+                    for k_idx, drop_val in enumerate(drop_curve):
+                        plot_data.append({
+                            "Explainer": explainer,
+                            "Instance": i,
+                            "Number of Features Removed (k)": k_idx + 1,
+                            "RoAR Metric (Performance Degradation)": drop_val
+                        })
+            
+            df_plot = pd.DataFrame(plot_data)
+            plt.figure(figsize=(14, 7))
+            sns.lineplot(
+                data=df_plot, 
+                x="Number of Features Removed (k)", 
+                y="RoAR Metric (Performance Degradation)", 
+                hue="Explainer", 
+                marker="o", 
+                dashes=False, 
+                linewidth=1.5,
+                alpha=0.3
+            )
+            plt.title(f"Descriptive Faithfulness Test: RoAR Performance Drop per Instance\n(Top-{top_k} Features Removed)", fontsize=14)
+            plt.xlabel("Instance Index", fontsize=12)
+            plt.ylabel("Average Performance Drop", fontsize=12)
+            plt.xticks(range(1, top_k + 1))
+            plt.legend(title="Explainers", bbox_to_anchor=(1.02, 1), loc='upper left')
+            plt.grid(True, axis='y', linestyle='--', alpha=0.6)
+            plt.grid(True, axis='x', linestyle=':', alpha=0.4)
+            plt.tight_layout()
+            plt.savefig("rq2_2.svg", format="svg", bbox_inches="tight")
+            plt.show()
+
+        return all_datas
+        
+    def do_all_test(self, top_k=5, display=False):
+        data1 = self.model_fidelity_test(display=display)
+        data2 = self.descriptive_faithfulness_test(top_k=top_k, display=display)
+        return {
+            "model fidelity": data1,
+            "descriptive faithfulness": data2,
+        }
+
+class DecisionMaker:
+    def __init__(self, name, model, features, classes, actions, causal_graph, utility_matrix, X_train, y_train, X_test, lime_seeds=[0, 1, 2], random_seed=42, n_samples=100):
+        self.name = name
+        self.model = model
+        self.features = features
+        self.classes = classes
+        self.actions = actions
+        self.causal_graph = causal_graph
+        self.X_train = X_train
+        self.y_train = y_train
+        self.X_test = X_test
+        self.lime_explainers = dict()
+        for seed in lime_seeds:
+            self.lime_explainers[seed] = lime.lime_tabular.LimeTabularExplainer(training_data=self.X_train.values, feature_names=self.features, class_names=self.classes, random_state=seed)
+        self.shap_explainer = shap.Explainer(self.model.predict, X_train)
+        self.utility_matrix = utility_matrix
         self.causal_explainer = UtilityAlignedTabularExplainer(self.model, self.X_train, self.features, self.actions, self.causal_graph, self.utility_matrix)
         self.random_seed = random_seed
-        self.num_instance = min(len(self.X_test), n_samples)
+        self.num_instances = min(len(self.X_test), n_samples)
+        self.explanation_types  = ["Utility-aligned", "SHAP"] + [f"Seed-{s} LIME" for s in lime_seeds]
+
+    def _explain_instances_feature(self, instance_1d, instance_2d):
+        explanations = {etype: [] for etype in self.explanation_types}
+
+        explanation = self.causal_explainer.explain_instance(instance_1d)
+        for feature_info in explanation:
+            feature_name = feature_info['features']
+            explanations["Utility-aligned"].append(feature_name)
+
+        shap_exp = shap_explanation_form(self.model, self.shap_explainer, instance_2d)
+        for feature_info in shap_exp:
+            feature_name = feature_info['feature']
+            explanations["SHAP"].append(feature_name)
+
+        for seed, lime_explainer in self.lime_explainers.items():
+            lime_exp = lime_explanation_form(self.model, lime_explainer, instance_1d)
+            for feature_info in lime_exp:
+                feature_name = feature_info['feature']
+                explanations[f"Seed-{seed} LIME"].append(feature_name)
+
+        return explanations
+
+    def decision_utility(self, top_k=5, display=False):
+        assert top_k < len(self.causal_explainer.critical_features), "top_k should be less than the number of critical features in the causal graph."
+        all_datas = dict()
+        for explainer in self.explanation_types:
+            all_datas[explainer] = []
+        
+        for i in range(self.num_instances):
+            instance_1d = self.X_test.iloc[i]
+            instance_2d = self.X_test.iloc[[i]]
+
+            explanations = self._explain_instances_feature(instance_1d, instance_2d)
+
+            for explainer in self.explanation_types:
+                tmp = []
+                features = explanations[explainer]
+                for k in range(1, top_k + 1):
+                    useful_features = [f for f in features[:k] if f in self.causal_explainer.critical_features]
+                    if len(useful_features) > 0:
+                        subsets = get_combinations_up_to_k(useful_features, k)
+                        utility_list = []
+                        for subset in subsets:
+                            probs = estimate_interventional_probability_tabular(self.model, self.X_train, instance_1d, list(subset))
+                            utility_list.append(np.max(self.utility_matrix @ probs.T))
+                        tmp.append(max(utility_list))
+                    else:
+                        probs = self.model.predict_proba(instance_2d)[0]
+                        tmp.append(np.max(self.utility_matrix @ probs.T))
+                all_datas[explainer].append(tmp)
+
+        if display:
+            plot_data = []
+            for explainer, utils in all_datas.items():
+                for i, instance_utils in enumerate(utils):
+                    for k_idx, val in enumerate(instance_utils):
+                        plot_data.append({
+                            "Explainer": explainer,
+                            "Instance": i,
+                            "Top-k Features": k_idx + 1,
+                            "Expected Utility": val
+                        })
+            
+            df_plot = pd.DataFrame(plot_data)
+
+            plt.figure(figsize=(12, 6))
+            sns.lineplot(
+                data=df_plot, 
+                x="Top-k Features", 
+                y="Expected Utility", 
+                hue="Explainer", 
+                marker="o", 
+                linewidth=2,
+                dashes=False
+            )
+            
+            plt.title(f"Decision Utility Evaluation over Top-k Features (N={self.num_instances})", fontsize=14)
+            plt.xlabel("Number of Top Features (k)", fontsize=12)
+            plt.ylabel("Maximum Expected Utility", fontsize=12)
+            plt.xticks(range(1, top_k + 1))
+            plt.grid(True, linestyle='--', alpha=0.6)
+            
+            plt.legend(title="Explainers", bbox_to_anchor=(1.02, 1), loc='upper left')
+            plt.tight_layout()
+            plt.savefig("rq3.svg", format="svg", bbox_inches="tight")
+            plt.show()
+
+        return all_datas
+
+

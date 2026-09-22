@@ -1,4 +1,5 @@
 import itertools
+from os import name
 import numpy as np
 import pandas as pd
 import pyagrum as gum
@@ -262,6 +263,46 @@ def local_RoAR(model, x_instance, features, attributions, k, X_train, y_train, X
         
     return original_prob - new_prob
 
+def top_k_RoAR(model, x_instance_2d, top_k_ordered_features, X_train, y_train, X_val, y_val):
+    res = model.predict(x_instance_2d)
+    target_class = res[0] if isinstance(res, (np.ndarray, list)) else res
+    original_prob = _get_target_prob(model, x_instance_2d, target_class)
+
+    cumulatives = []
+
+    top_k = len(top_k_ordered_features)
+    for k in range(1, top_k + 1):
+        if isinstance(X_train, pd.DataFrame):
+            X_train_clone = X_train.drop(columns=top_k_ordered_features[:k])
+            X_val_clone = X_val.drop(columns=top_k_ordered_features[:k])
+            instance = x_instance_2d.drop(columns=top_k_ordered_features[:k]) if isinstance(x_instance_2d, pd.DataFrame) else x_instance_2d.drop(labels=top_k_ordered_features[:k])
+        else:
+            X_train_clone = np.delete(X_train, top_k_ordered_features[:k], axis=1)
+            X_val_clone = np.delete(X_val, top_k_ordered_features[:k], axis=1)
+            instance = np.delete(x_instance_2d, top_k_ordered_features[:k], axis=1 if x_instance_2d.ndim == 2 else 0)
+
+        if isinstance(model, BaseEstimator):
+            cloned_model = clone(model)
+        elif isinstance(model, xgb.XGBClassifier):
+            cloned_model = xgb.XGBClassifier()
+            cloned_model.set_params(**model.get_params())
+        else:
+            raise ValueError("Unsupported model type. Please provide a scikit-learn estimator or an XGBoost classifier.")
+
+        if isinstance(cloned_model, xgb.XGBClassifier):
+            cloned_model.fit(X_train_clone, y_train, eval_set=[(X_val_clone, y_val)], verbose=False)
+        else:
+            cloned_model.fit(X_train_clone, y_train)     
+    
+        inst_2d = instance.to_frame().T if isinstance(instance, pd.Series) else (
+            instance.reshape(1, -1) if isinstance(instance, np.ndarray) and instance.ndim == 1 else instance
+        )
+        new_prob = _get_target_prob(cloned_model, inst_2d, target_class)
+        
+        cumulatives.append(original_prob - new_prob)
+
+    return np.array(cumulatives)
+
 def jaccard_similarity(A, B):
     return len(set(A) & set(B)) / max(len(set(A) | set(B)), 1e-16)
 
@@ -311,9 +352,7 @@ class CausalDAG:
         regimeId = self.graph.idFromName(f"F_{feature}")
         remained_treatmentId = self.treatmentId[:]
         remained_treatmentId.remove(featureId)
-        #return self.graph.dSeparation(regimeId, remained_treatmentId) and self.graph.dSeparation(regimeId, self.outcomeId, self.treatmentId)
-        return self.graph.dSeparation(regimeId, remained_treatmentId) and not self.graph.dSeparation(regimeId, self.outcomeId, featureId)
-        #return self.graph.dSeparation(regimeId, remained_treatmentId) and not self.graph.dSeparation(regimeId, self.outcomeId)
+        return self.graph.dSeparation(regimeId, remained_treatmentId) and not self.graph.dSeparation(regimeId, self.outcomeId, [featureId])
 
     def extract_parents(self, feature):
         assert feature in self.treatments, "This feature does not exist"
@@ -327,14 +366,14 @@ class CausalDAG:
         return parents
 
     def possible_actions(self, explanation_signals):
-        assert (self.causal_validity(e) for e in explanation_signals), "This signal is in valid"
+        assert (self.causal_validity(e) for e in explanation_signals), "This signal is invalid"
         action_sets = set()
         for feature in explanation_signals:
             featureId = self.graph.idFromName(feature)
             regimeId = self.graph.idFromName(f"F_{feature}")
             for o in self.outcomeId:
                 action = self.graph.nameFromId(o)
-                if not self.graph.dSeparation(regimeId, o, featureId):
+                if not self.graph.dSeparation(regimeId, o, [featureId]):
                     action_sets = action_sets | {action}
         return action_sets
 
@@ -347,3 +386,114 @@ class CausalDAG:
 
     def getDAG(self):
         return self.graph
+
+    # ==========================================
+    # HELPER METHODS FOR toDot 
+    # ==========================================
+    
+    @staticmethod
+    def _escape_id(name: str) -> str:
+        """Escape node identifier used internally by DOT."""
+        return str(name).replace("\\", "\\\\").replace('"', '\\"')
+
+    @staticmethod
+    def _escape_html(name: str) -> str:
+        """Escape text used inside Graphviz HTML-like labels."""
+        return str(name).replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+
+    @classmethod
+    def _feature_label(cls, name: str) -> str:
+        """Math-style feature label: Sick -> Sick (italic)"""
+        return f'<<I>{cls._escape_html(name)}</I>>'
+
+    @classmethod
+    def _regime_label(cls, name: str) -> str:
+        """Math-style regime label: F_Sick -> F_{Sick}"""
+        feature = name[2:] if name.startswith("F_") else name
+        return f'<<I>F</I><SUB><I>{cls._escape_html(feature)}</I></SUB>>'
+
+    @classmethod
+    def _action_label(cls, name: str) -> str:
+        """Actions are written upright to distinguish them."""
+        return f'<<B>{cls._escape_html(name)}</B>>'
+
+    # ==========================================
+    # COMPONENT BUILDERS 
+    # ==========================================
+
+    def _build_global_styles(self) -> str:
+        return """
+    graph [rankdir=LR, splines=spline, overlap=false, nodesep=0.45, ranksep=1.0, pad=0.25, size="10,10!"];
+    node [fontname="Times New Roman", fontsize=12, margin="0.08,0.05"];
+    edge [arrowsize=0.8, penwidth=1.1];
+        """
+
+    def _build_regime_nodes(self) -> str:
+        lines = ["    // Intervention / regime nodes", "    { rank=source;"]
+        for node in sorted(self.regimes):
+            node_id = self._escape_id(node)
+            label = self._regime_label(node)
+            lines.append(
+                f'        "{node_id}" [label={label}, shape=diamond, width=0.55, height=0.40, '
+                f'style="filled,dashed", fillcolor="#FFF2CC", color="#C9A227"];'
+            )
+        lines.append("    }")
+        return "\n".join(lines)
+
+    def _build_feature_nodes(self) -> str:
+        lines = ["    // Feature nodes"]
+        for node in sorted(self.treatments):
+            node_id = self._escape_id(node)
+            label = self._feature_label(node)
+            lines.append(
+                f'    "{node_id}" [label={label}, shape=box, style="rounded,filled", '
+                f'fillcolor="#D9EAF7", color="#4A7FA7"];'
+            )
+        return "\n".join(lines)
+
+    def _build_action_nodes(self) -> str:
+        lines = ["    // Action nodes", "    { rank=sink;"]
+        for node in sorted(self.outcomes):
+            node_id = self._escape_id(node)
+            label = self._action_label(node)
+            lines.append(
+                f'        "{node_id}" [label={label}, shape=hexagon, style="filled", '
+                f'fillcolor="#D9EAD3", color="#548235"];'
+            )
+        lines.append("    }")
+        return "\n".join(lines)
+
+    def _build_edges(self) -> str:
+        lines = ["    // Edges"]
+        for source_id, target_id in self.graph.arcs():
+            source_name = self.graph.nameFromId(source_id)
+            target_name = self.graph.nameFromId(target_id)
+            
+            source = self._escape_id(source_name)
+            target = self._escape_id(target_name)
+
+            if source_name in self.regimes:
+                # Regime -> corresponding feature
+                lines.append(f'    "{source}" -> "{target}" [style=dashed, color="#777777", penwidth=1.0];')
+            else:
+                # Ordinary causal / dependency edge
+                lines.append(f'    "{source}" -> "{target}" [color="#333333"];')
+        return "\n".join(lines)
+
+    # ==========================================
+    # MAIN toDot METHOD
+    # ==========================================
+
+    def toDot(self) -> str:
+        """Sinh mã Graphviz DOT cho CausalDAG."""
+        parts = [
+            "digraph CausalDAG {",
+            self._build_global_styles(),
+            self._build_regime_nodes(),
+            self._build_feature_nodes(),
+            self._build_action_nodes(),
+            self._build_edges(),
+            "}"
+        ]
+        
+        return "\n\n".join(filter(None, parts))

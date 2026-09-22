@@ -102,6 +102,33 @@ def top_k_shap_explanation_form(model, shap_explainer, x_instance_2d, importance
     attribution.sort(reverse=True, key=lambda x: (x["absolute score"] if importance else x["signed score"]))
     return attribution[:top_k]
 
+def ci_based_CIU_explanation_form(explainer, instance, output_idx):
+    res = explainer.explain(instance=instance, output_inds=output_idx)
+    attribution = []
+    for feature_tuple, row in res.iterrows():
+        feature, = feature_tuple
+        attribution.append(explanation_form(feature, row["CI"]))
+    attribution.sort(reverse=True, key=lambda x: x["signed score"])
+    return attribution
+
+def cu_based_CIU_explanation_form(explainer, instance, output_idx):
+    res = explainer.explain(instance=instance, output_inds=output_idx)
+    attribution = []
+    for feature_tuple, row in res.iterrows():
+        feature, = feature_tuple
+        attribution.append(explanation_form(feature, row["CU"]))
+    attribution.sort(reverse=True, key=lambda x: x["signed score"])
+    return attribution
+
+def influence_based_CIU_explanation_form(explainer, instance, output_idx):
+    res = explainer.explain(instance=instance, output_inds=output_idx)
+    attribution = []
+    for feature_tuple, row in res.iterrows():
+        feature, = feature_tuple
+        attribution.append(explanation_form(feature, row["Cinfl"]))
+    attribution.sort(reverse=True, key=lambda x: x["absolute score"])
+    return attribution
+
 class UtilityAlignedExplainer(ABC):
     def __init__(self, model, X_train, *, actions, causal_graph:CausalDAG, utility_matrix, **kwargs):
         assert set(actions) == causal_graph.outcomes, "Invalid causal model"
