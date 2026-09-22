@@ -576,6 +576,7 @@ class DecisionMaker:
         
         absolute_results = []
         delta_results = []
+        delta_results_2 = []
         
         for i in range(n_samples):
             instance_2d = filted_instances.iloc[[i]]
@@ -588,6 +589,7 @@ class DecisionMaker:
 
             tmp_abs = []
             tmp_delta = []
+            tmp_delta_2 = []
             
             for k in range(1, top_k + 1):
                 top_k_explanation = features_list[:k]
@@ -598,25 +600,33 @@ class DecisionMaker:
                     utility_list.append(np.max(self.utility_matrix @ probs.T))
                 
                 max_u_k = max(utility_list)
+                if len(tmp_abs) > 0:
+                    tmp_delta_2.append(max_u_k - tmp_abs[-1])
+                #else:
+                    #tmp_delta_2.append(max_u_k)
                 tmp_abs.append(max_u_k)
                 tmp_delta.append(max_u_k - u_0) 
                 
             absolute_results.append(tmp_abs)
             delta_results.append(tmp_delta)
+            delta_results_2.append(tmp_delta_2)
 
         if display:
             abs_arr = np.array(absolute_results)
             delta_arr = np.array(delta_results)
+            delta_arr_2 = np.array(delta_results_2)
             
             mean_abs = np.mean(abs_arr, axis=0)
             std_abs = np.std(abs_arr, axis=0)
             
             mean_delta = np.mean(delta_arr, axis=0)
-            std_delta = np.std(delta_arr, axis=0)
+            #std_delta = np.std(delta_arr, axis=0)
+
+            mean_delta_2 = np.mean(delta_arr_2, axis=0)
             
             k_values = range(1, top_k + 1)
             
-            fig, axes = plt.subplots(1, 2, figsize=(16, 6))
+            fig, axes = plt.subplots(1, 3, figsize=(24, 6))
             
             axes[0].plot(k_values, mean_abs, marker='o', linewidth=2, color='#1f77b4')
             axes[0].fill_between(k_values, mean_abs - std_abs, mean_abs + std_abs, color='#1f77b4', alpha=0.15)
@@ -627,15 +637,25 @@ class DecisionMaker:
             axes[0].grid(True, linestyle='--', alpha=0.6)
             
             axes[1].plot(k_values, mean_delta, marker='s', linewidth=2, color='#ff7f0e')
-            axes[1].fill_between(k_values, mean_delta - std_delta, mean_delta + std_delta, color='#ff7f0e', alpha=0.15)
+            #axes[1].fill_between(k_values, mean_delta - std_delta, mean_delta + std_delta, color='#ff7f0e', alpha=0.15)
             axes[1].axhline(0, color='black', linestyle='-', linewidth=1.5, alpha=0.6) 
             axes[1].set_title(r'Average $\Delta$ Decision Utility ($U_k - U_0$)', fontsize=14)
             axes[1].set_xlabel('Number of Features (k)', fontsize=12)
             axes[1].set_ylabel(r'$\Delta$ Expected Utility', fontsize=12)
             axes[1].set_xticks(k_values)
             axes[1].grid(True, linestyle='--', alpha=0.6)
+
+            axes[2].plot(range(2, top_k + 1), mean_delta_2, marker='x', linewidth=2, color="#ff0ee7")
+            #axes[1].fill_between(k_values, mean_delta - std_delta, mean_delta + std_delta, color='#ff7f0e', alpha=0.15)
+            axes[2].axhline(0, color='black', linestyle='-', linewidth=1.5, alpha=0.6) 
+            axes[2].set_title(r'Average $\Delta$ Decision Utility ($U_k - U_{k-1}$)', fontsize=14)
+            axes[2].set_xlabel('Number of Features (k)', fontsize=12)
+            axes[2].set_ylabel(r'$\Delta$ Expected Utility', fontsize=12)
+            axes[2].set_xticks(range(2, top_k + 1))
+            axes[2].grid(True, linestyle='--', alpha=0.6)
             
             plt.tight_layout()
+            plt.savefig("rq3.svg", format="svg", bbox_inches="tight")
             plt.show()
 
         return absolute_results, delta_results
