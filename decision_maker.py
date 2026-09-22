@@ -354,12 +354,12 @@ class BaselineTester:
     def _explain_instances_feature(self, instance_1d, instance_2d):
         explanations = {etype: [] for etype in self.explanation_types}
 
-        biased_explanation = self.biased_causal_explainer.explain_instance(instance_1d)
+        biased_explanation = self.biased_causal_explainer.explain_instance(instance_2d)
         for feature_info in biased_explanation:
             feature_name = feature_info['features']
             explanations["Biased-utility Utility-aligned"].append(feature_name)
 
-        neutral_explanation = self.neutral_causal_explainer.explain_instance(instance_1d)
+        neutral_explanation = self.neutral_causal_explainer.explain_instance(instance_2d)
         for feature_info in neutral_explanation:
             feature_name = feature_info['features']
             explanations["Neutral-utility Utility-aligned"].append(feature_name)
@@ -392,7 +392,7 @@ class BaselineTester:
 
         return explanations
 
-    def model_fidelity_test(self, display=False):
+    def model_sensitivity_test(self, display=False):
         if isinstance(self.model, xgb.XGBClassifier):
             corrupted_model = xgb.XGBClassifier()
             corrupted_model.set_params(**self.model.get_params())
@@ -482,7 +482,7 @@ class BaselineTester:
             plt.figure(figsize=(12, 6))
             sns.boxplot(data=df_plot, palette="Set3", showfliers=False)
             sns.stripplot(data=df_plot, color="black", alpha=0.4, jitter=True, size=3)
-            plt.title("Model Fidelity Test: Sanity Checks over Feature Rankings")
+            plt.title("Model Sensitivity Test: Sanity Checks over Feature Rankings")
             plt.ylabel("Spearman Similarity")
             plt.xticks(rotation=45)
             plt.grid(axis='y', linestyle='--', alpha=0.7)
@@ -521,18 +521,20 @@ class BaselineTester:
             
             df_plot = pd.DataFrame(plot_data)
             plt.figure(figsize=(14, 7))
+            
             sns.lineplot(
                 data=df_plot, 
                 x="Number of Features Removed (k)", 
                 y="RoAR Metric (Performance Degradation)", 
                 hue="Explainer", 
                 marker="o", 
-                dashes=False, 
-                linewidth=1.5,
-                alpha=0.3
+                linewidth=2,
+                errorbar='sd',
+                err_kws={'alpha': 0.1}
             )
-            plt.title(f"Descriptive Faithfulness Test: RoAR Performance Drop per Instance\n(Top-{top_k} Features Removed)", fontsize=14)
-            plt.xlabel("Instance Index", fontsize=12)
+            
+            plt.title(f"Descriptive Faithfulness Test: RoAR Performance Drop\n(Top-{top_k} Features Removed)", fontsize=14)
+            plt.xlabel("Number of Features Removed (k)", fontsize=12) 
             plt.ylabel("Average Performance Drop", fontsize=12)
             plt.xticks(range(1, top_k + 1))
             plt.legend(title="Explainers", bbox_to_anchor=(1.02, 1), loc='upper left')
@@ -545,120 +547,97 @@ class BaselineTester:
         return all_datas
         
     def do_all_test(self, top_k=5, display=False):
-        data1 = self.model_fidelity_test(display=display)
+        data1 = self.model_sensitivity_test(display=display)
         data2 = self.descriptive_faithfulness_test(top_k=top_k, display=display)
         return {
-            "model fidelity": data1,
+            "model sensitivity": data1,
             "descriptive faithfulness": data2,
         }
 
 class DecisionMaker:
-    def __init__(self, name, model, features, classes, actions, causal_graph, utility_matrix, X_train, y_train, X_test, lime_seeds=[0, 1, 2], random_seed=42, n_samples=100):
+    def __init__(self, name, model, features, actions, causal_graph, utility_matrix, X_train, y_train, X_test, random_seed=42):
         self.name = name
         self.model = model
         self.features = features
-        self.classes = classes
         self.actions = actions
         self.causal_graph = causal_graph
         self.X_train = X_train
         self.y_train = y_train
         self.X_test = X_test
-        self.lime_explainers = dict()
-        for seed in lime_seeds:
-            self.lime_explainers[seed] = lime.lime_tabular.LimeTabularExplainer(training_data=self.X_train.values, feature_names=self.features, class_names=self.classes, random_state=seed)
-        self.shap_explainer = shap.Explainer(self.model.predict, X_train)
         self.utility_matrix = utility_matrix
         self.causal_explainer = UtilityAlignedTabularExplainer(self.model, self.X_train, self.features, self.actions, self.causal_graph, self.utility_matrix)
         self.random_seed = random_seed
-        self.num_instances = min(len(self.X_test), n_samples)
-        self.explanation_types  = ["Utility-aligned", "SHAP"] + [f"Seed-{s} LIME" for s in lime_seeds]
 
-    def _explain_instances_feature(self, instance_1d, instance_2d):
-        explanations = {etype: [] for etype in self.explanation_types}
 
-        explanation = self.causal_explainer.explain_instance(instance_1d)
-        for feature_info in explanation:
-            feature_name = feature_info['features']
-            explanations["Utility-aligned"].append(feature_name)
-
-        shap_exp = shap_explanation_form(self.model, self.shap_explainer, instance_2d)
-        for feature_info in shap_exp:
-            feature_name = feature_info['feature']
-            explanations["SHAP"].append(feature_name)
-
-        for seed, lime_explainer in self.lime_explainers.items():
-            lime_exp = lime_explanation_form(self.model, lime_explainer, instance_1d)
-            for feature_info in lime_exp:
-                feature_name = feature_info['feature']
-                explanations[f"Seed-{seed} LIME"].append(feature_name)
-
-        return explanations
-
-    def decision_utility(self, top_k=5, display=False):
+    def decision_utility(self, top_k=5, n_samples=100, display=False):
         assert top_k < len(self.causal_explainer.critical_features), "top_k should be less than the number of critical features in the causal graph."
-        all_datas = dict()
-        for explainer in self.explanation_types:
-            all_datas[explainer] = []
+        assert n_samples <= len(self.X_test), "number of samples should fit the size of test dataset"
+        filted_instances = self.X_test.sample(n=n_samples, random_state=self.random_seed)
         
-        for i in range(self.num_instances):
-            instance_1d = self.X_test.iloc[i]
-            instance_2d = self.X_test.iloc[[i]]
+        absolute_results = []
+        delta_results = []
+        
+        for i in range(n_samples):
+            instance_2d = filted_instances.iloc[[i]]
 
-            explanations = self._explain_instances_feature(instance_1d, instance_2d)
+            explanation = self.causal_explainer.explain_instance(instance_2d)
+            features_list = [e["features"] for e in explanation]
 
-            for explainer in self.explanation_types:
-                tmp = []
-                features = explanations[explainer]
-                for k in range(1, top_k + 1):
-                    useful_features = [f for f in features[:k] if f in self.causal_explainer.critical_features]
-                    if len(useful_features) > 0:
-                        subsets = get_combinations_up_to_k(useful_features, k)
-                        utility_list = []
-                        for subset in subsets:
-                            probs = estimate_interventional_probability_tabular(self.model, self.X_train, instance_1d, list(subset))
-                            utility_list.append(np.max(self.utility_matrix @ probs.T))
-                        tmp.append(max(utility_list))
-                    else:
-                        probs = self.model.predict_proba(instance_2d)[0]
-                        tmp.append(np.max(self.utility_matrix @ probs.T))
-                all_datas[explainer].append(tmp)
+            probs_0 = estimate_interventional_probability_tabular(self.model, self.X_train, instance_2d, [])
+            u_0 = np.max(self.utility_matrix @ probs_0.T)
+
+            tmp_abs = []
+            tmp_delta = []
+            
+            for k in range(1, top_k + 1):
+                top_k_explanation = features_list[:k]
+                subsets = get_combinations_up_to_k(top_k_explanation, k)
+                utility_list = []
+                for subset in subsets:
+                    probs = estimate_interventional_probability_tabular(self.model, self.X_train, instance_2d, list(subset))
+                    utility_list.append(np.max(self.utility_matrix @ probs.T))
+                
+                max_u_k = max(utility_list)
+                tmp_abs.append(max_u_k)
+                tmp_delta.append(max_u_k - u_0) 
+                
+            absolute_results.append(tmp_abs)
+            delta_results.append(tmp_delta)
 
         if display:
-            plot_data = []
-            for explainer, utils in all_datas.items():
-                for i, instance_utils in enumerate(utils):
-                    for k_idx, val in enumerate(instance_utils):
-                        plot_data.append({
-                            "Explainer": explainer,
-                            "Instance": i,
-                            "Top-k Features": k_idx + 1,
-                            "Expected Utility": val
-                        })
+            abs_arr = np.array(absolute_results)
+            delta_arr = np.array(delta_results)
             
-            df_plot = pd.DataFrame(plot_data)
-
-            plt.figure(figsize=(12, 6))
-            sns.lineplot(
-                data=df_plot, 
-                x="Top-k Features", 
-                y="Expected Utility", 
-                hue="Explainer", 
-                marker="o", 
-                linewidth=2,
-                dashes=False
-            )
+            mean_abs = np.mean(abs_arr, axis=0)
+            std_abs = np.std(abs_arr, axis=0)
             
-            plt.title(f"Decision Utility Evaluation over Top-k Features (N={self.num_instances})", fontsize=14)
-            plt.xlabel("Number of Top Features (k)", fontsize=12)
-            plt.ylabel("Maximum Expected Utility", fontsize=12)
-            plt.xticks(range(1, top_k + 1))
-            plt.grid(True, linestyle='--', alpha=0.6)
+            mean_delta = np.mean(delta_arr, axis=0)
+            std_delta = np.std(delta_arr, axis=0)
             
-            plt.legend(title="Explainers", bbox_to_anchor=(1.02, 1), loc='upper left')
+            k_values = range(1, top_k + 1)
+            
+            fig, axes = plt.subplots(1, 2, figsize=(16, 6))
+            
+            axes[0].plot(k_values, mean_abs, marker='o', linewidth=2, color='#1f77b4')
+            axes[0].fill_between(k_values, mean_abs - std_abs, mean_abs + std_abs, color='#1f77b4', alpha=0.15)
+            axes[0].set_title('Average Absolute Decision Utility', fontsize=14)
+            axes[0].set_xlabel('Number of Features (k)', fontsize=12)
+            axes[0].set_ylabel('Expected Utility', fontsize=12)
+            axes[0].set_xticks(k_values)
+            axes[0].grid(True, linestyle='--', alpha=0.6)
+            
+            axes[1].plot(k_values, mean_delta, marker='s', linewidth=2, color='#ff7f0e')
+            axes[1].fill_between(k_values, mean_delta - std_delta, mean_delta + std_delta, color='#ff7f0e', alpha=0.15)
+            axes[1].axhline(0, color='black', linestyle='-', linewidth=1.5, alpha=0.6) 
+            axes[1].set_title(r'Average $\Delta$ Decision Utility ($U_k - U_0$)', fontsize=14)
+            axes[1].set_xlabel('Number of Features (k)', fontsize=12)
+            axes[1].set_ylabel(r'$\Delta$ Expected Utility', fontsize=12)
+            axes[1].set_xticks(k_values)
+            axes[1].grid(True, linestyle='--', alpha=0.6)
+            
             plt.tight_layout()
-            plt.savefig("rq3.svg", format="svg", bbox_inches="tight")
             plt.show()
 
-        return all_datas
+        return absolute_results, delta_results
 
 
