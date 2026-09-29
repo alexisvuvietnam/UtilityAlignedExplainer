@@ -3,6 +3,7 @@ from os import name
 import numpy as np
 import pandas as pd
 import pyagrum as gum
+from scipy.stats import spearmanr
 from sklearn.base import BaseEstimator, clone
 import xgboost as xgb
 
@@ -310,9 +311,16 @@ def jaccard_distance(A, B):
     return 1 - jaccard_similarity(A, B)
 
 def spearman_similarity(A, B):
-    C = set(A) & set(B)
-    assert C != set(), "There is no similarity to compare"
-    return 1 - (6 * sum((A.index(x) - B.index(x))**2 for x in C)) / max(len(A) * (len(A)**2 - 1), 1e-16)
+    #C = set(A) & set(B)
+    #assert C != set(), "There is no similarity to compare"
+    #return 1 - (6 * sum((A.index(x) - B.index(x))**2 for x in C)) / max(len(A) * (len(A)**2 - 1), 1e-16)
+    assert set(A) == set(B), "Two rankings must contain the same elements"
+    assert len(A) == len(set(A)), "Ranking A contains duplicate elements"
+    assert len(B) == len(set(B)), "Ranking B contains duplicate elements"
+    rank_A = [A.index(x) for x in A]
+    rank_B = [B.index(x) for x in A]
+    res, _ = spearmanr(rank_A, rank_B)
+    return res
 
 def fairness_metric(explanation, sensitive_features):
     if set(explanation) & set(sensitive_features) == set():
